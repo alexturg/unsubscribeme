@@ -1,0 +1,32 @@
+[Unit]
+Description=UnsubscribeMe Telegram YouTube RSS Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Замените на пользователя, под которым должен работать бот
+User=YOUR_USER
+Group=YOUR_USER
+
+# Рабочая директория — путь до клон‑репозитория на сервере
+WorkingDirectory=/opt/unsubscribeme
+
+# Файл окружения с токеном и настройками
+EnvironmentFile=/opt/unsubscribeme/.env
+
+# Путь до исполняемого файла в venv
+ExecStart=/opt/unsubscribeme/.venv/bin/unsubscribeme
+Restart=always
+RestartSec=5s
+
+# Логи идут в journald: смотрите `journalctl -u unsubscribeme -f`
+StandardOutput=journal
+StandardError=journal
+
+# Немного увеличим лимиты (по желанию)
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+
