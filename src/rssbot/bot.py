@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-import json
 from dataclasses import dataclass
 from typing import Optional
 
@@ -11,7 +9,7 @@ from aiogram.types import Message
 from .config import Settings
 from .db import Delivery, Feed, FeedBaseline, FeedRule, Item, Session, User, session_scope
 from .scheduler import BotScheduler
-from .rss import fetch_and_store_latest_item, fetch_and_store_recent
+from .rss import fetch_and_store_latest_item
 
 
 router = Router()
@@ -62,60 +60,16 @@ async def cmd_start(message: Message) -> None:
             user = User(chat_id=message.chat.id, tz=DEPS.settings.TZ)
             s.add(user)
             s.flush()
+    web_link = f"http://{DEPS.settings.WEB_HOST}:{DEPS.settings.WEB_PORT}/u/{message.chat.id}"
     await message.answer(
-        "Привет! Я буду присылать новые видео из твоих YouTube RSS.\n"
-        "Команды: /addfeed, /channel, /playlist, /list, /remove, /setmode, /setfilter, /digest, /latest, /mute, /unmute, /dedupe."
+        "Привет! Настраивать ленты теперь удобнее в веб-интерфейсе.\n"
+        f"Открой: {web_link}\n\n"
+        "В боте доступны: быстрые добавления и переключение расписания.\n"
+        "Команды: /channel, /playlist, /setmode"
     )
 
 
-@router.message(Command("addfeed"))
-async def cmd_addfeed(message: Message) -> None:
-    user_id = _ensure_user_id(message)
-    if not user_id:
-        await message.answer("Доступ запрещен.")
-        return
-
-    text = (message.text or "").strip().split(maxsplit=1)
-    if len(text) < 2:
-        await message.answer(
-            "Использование: /addfeed <url> [mode=immediate|digest|on_demand] [label=...] [interval=10] [time=HH:MM]"
-        )
-        return
-    args = text[1].split()
-    url = None
-    mode = "immediate"
-    label = None
-    interval = DEPS.settings.DEFAULT_POLL_INTERVAL_MIN
-    digest_time = DEPS.settings.DIGEST_DEFAULT_TIME
-
-    for a in args:
-        if a.startswith("mode="):
-            mode = a.split("=", 1)[1]
-        elif a.startswith("label="):
-            label = a.split("=", 1)[1]
-        elif a.startswith("interval="):
-            try:
-                interval = int(a.split("=", 1)[1])
-            except Exception:
-                pass
-        elif a.startswith("time="):
-            digest_time = a.split("=", 1)[1]
-        elif not url:
-            url = a
-
-    if not url:
-        await message.answer("Не указан URL ленты.")
-        return
-
-    await _create_feed_and_seed_reply(
-        message=message,
-        user_id=user_id,
-        url=url,
-        mode=mode,
-        label=label,
-        interval=interval,
-        digest_time=digest_time,
-    )
+# NOTE: Bot trimmed to minimal commands per request
 
 
 async def _create_feed_and_seed_reply(
@@ -277,7 +231,10 @@ async def cmd_channel(message: Message) -> None:
     interval = DEPS.settings.DEFAULT_POLL_INTERVAL_MIN
     digest_time = DEPS.settings.DIGEST_DEFAULT_TIME
     for a in parts[2:]:
-        if a.startswith("mode="):
+        aval = a.strip().lower()
+        if aval in ("immediate", "digest", "on_demand"):
+            mode = aval
+        elif a.startswith("mode="):
             mode = a.split("=", 1)[1]
         elif a.startswith("label="):
             label = a.split("=", 1)[1]
@@ -314,7 +271,10 @@ async def cmd_playlist(message: Message) -> None:
     interval = DEPS.settings.DEFAULT_POLL_INTERVAL_MIN
     digest_time = DEPS.settings.DIGEST_DEFAULT_TIME
     for a in parts[2:]:
-        if a.startswith("mode="):
+        aval = a.strip().lower()
+        if aval in ("immediate", "digest", "on_demand"):
+            mode = aval
+        elif a.startswith("mode="):
             mode = a.split("=", 1)[1]
         elif a.startswith("label="):
             label = a.split("=", 1)[1]
@@ -329,87 +289,7 @@ async def cmd_playlist(message: Message) -> None:
     await _create_feed_and_seed_reply(message, user_id, url, mode, label, interval, digest_time)
 
 
-@router.message(Command("list"))
-async def cmd_list(message: Message) -> None:
-    user_id = _ensure_user_id(message)
-    if not user_id:
-        await message.answer("Доступ запрещен.")
-        return
-    with session_scope() as s:
-        feeds = s.query(Feed).filter(Feed.user_id == user_id).order_by(Feed.id.asc()).all()
-    if not feeds:
-        await message.answer("Список лент пуст.")
-        return
-    lines = ["Ленты:"]
-    for f in feeds:
-        lines.append(
-            f"#{f.id}: {f.label or f.url} | mode={f.mode} | enabled={f.enabled} | interval={f.poll_interval_min} | time={f.digest_time_local or '-'}"
-        )
-    await message.answer("\n".join(lines))
-
-
-@router.message(Command("remove"))
-async def cmd_remove(message: Message) -> None:
-    user_id = _ensure_user_id(message)
-    if not user_id:
-        await message.answer("Доступ запрещен.")
-        return
-    parts = (message.text or "").split()
-    if len(parts) < 2:
-        await message.answer("Использование: /remove <feed_id>")
-        return
-    try:
-        feed_id = int(parts[1])
-    except Exception:
-        await message.answer("Неверный id.")
-        return
-
-    with session_scope() as s:
-        feed = s.get(Feed, feed_id)
-        if not feed or feed.user_id != user_id:
-            await message.answer("Лента не найдена.")
-            return
-        feed.enabled = False
-    DEPS.scheduler.unschedule_feed_poll(feed_id)
-    await message.answer("Лента отключена.")
-
-
-@router.message(Command("mute"))
-async def cmd_mute(message: Message) -> None:
-    await _toggle_enabled(message, False)
-
-
-@router.message(Command("unmute"))
-async def cmd_unmute(message: Message) -> None:
-    await _toggle_enabled(message, True)
-
-
-async def _toggle_enabled(message: Message, value: bool) -> None:
-    user_id = _ensure_user_id(message)
-    if not user_id:
-        await message.answer("Доступ запрещен.")
-        return
-    parts = (message.text or "").split()
-    if len(parts) < 2:
-        await message.answer(f"Использование: /{'unmute' if value else 'mute'} <feed_id>")
-        return
-    try:
-        feed_id = int(parts[1])
-    except Exception:
-        await message.answer("Неверный id.")
-        return
-    with session_scope() as s:
-        feed = s.get(Feed, feed_id)
-        if not feed or feed.user_id != user_id:
-            await message.answer("Лента не найдена.")
-            return
-        feed.enabled = value
-        interval = feed.poll_interval_min
-    if value:
-        DEPS.scheduler.schedule_feed_poll(feed_id, interval)
-    else:
-        DEPS.scheduler.unschedule_feed_poll(feed_id)
-    await message.answer("Готово.")
+# Removed list/remove/mute/unmute; web UI handles management
 
 
 @router.message(Command("setmode"))
@@ -448,202 +328,16 @@ async def cmd_setmode(message: Message) -> None:
     await message.answer("Режим обновлён.")
 
 
-@router.message(Command("setfilter"))
-async def cmd_setfilter(message: Message) -> None:
-    user_id = _ensure_user_id(message)
-    if not user_id:
-        await message.answer("Доступ запрещен.")
-        return
-    text = (message.text or "").split(maxsplit=2)
-    if len(text) < 3:
-        await message.answer(
-            "Использование: /setfilter <feed_id> <json>, например: {\"include_keywords\":[\"обзор\"]}"
-        )
-        return
-    try:
-        feed_id = int(text[1])
-    except Exception:
-        await message.answer("Неверный id.")
-        return
-    try:
-        payload = json.loads(text[2])
-    except Exception:
-        await message.answer("Неверный JSON.")
-        return
-    with session_scope() as s:
-        feed = s.get(Feed, feed_id)
-        if not feed or feed.user_id != user_id:
-            await message.answer("Лента не найдена.")
-            return
-        rules = feed.rules or FeedRule(feed_id=feed.id)
-        for key in (
-            "include_keywords",
-            "exclude_keywords",
-            "include_regex",
-            "exclude_regex",
-            "require_all",
-            "case_sensitive",
-            "categories",
-            "min_duration_sec",
-            "max_duration_sec",
-        ):
-            if key in payload:
-                setattr(rules, key, payload[key])
-        s.add(rules)
-    await message.answer("Фильтры обновлены.")
+# Removed setfilter; filters may be added to web UI later
 
 
-@router.message(Command("digest"))
-async def cmd_digest(message: Message) -> None:
-    user_id = _ensure_user_id(message)
-    if not user_id:
-        await message.answer("Доступ запрещен.")
-        return
-    parts = (message.text or "").split()
-    target = parts[1] if len(parts) > 1 else "all"
-    if target == "all":
-        with session_scope() as s:
-            feeds = s.query(Feed).filter(Feed.user_id == user_id).all()
-        count = 0
-        for f in feeds:
-            await DEPS.scheduler._send_digest_for_feed(f.id)
-            count += 1
-        await message.answer(f"Дайджест отправлен для {count} лент.")
-    else:
-        try:
-            feed_id = int(target)
-        except Exception:
-            await message.answer("Неверный аргумент. Используйте 'all' или id ленты.")
-            return
-        await DEPS.scheduler._send_digest_for_feed(feed_id)
-        await message.answer("Дайджест отправлен.")
+# Removed manual digest trigger
 
 
-@router.message(Command("latest"))
-async def cmd_latest(message: Message) -> None:
-    """Вывести N последних видео.
-
-    Формат:
-    - /latest N — показать N последних по всем вашим лентам
-    - /latest N <feed_id> — показать N последних только для указанной ленты
-    """
-    user_id = _ensure_user_id(message)
-    if not user_id:
-        await message.answer("Доступ запрещен.")
-        return
-    parts = (message.text or "").split()
-    if len(parts) < 2:
-        await message.answer("Использование: /latest <N> [feed_id]")
-        return
-    try:
-        n = int(parts[1])
-        if n <= 0:
-            raise ValueError
-    except Exception:
-        await message.answer("N должно быть положительным числом.")
-        return
-    feed_id = None
-    if len(parts) >= 3:
-        try:
-            feed_id = int(parts[2])
-        except Exception:
-            await message.answer("feed_id должно быть числом.")
-            return
-
-    # Query items ignoring deliveries/baseline/filters
-    with session_scope() as s:
-        if feed_id is not None:
-            feed = s.get(Feed, feed_id)
-            if not feed or feed.user_id != user_id:
-                await message.answer("Лента не найдена.")
-                return
-            items = (
-                s.query(Item)
-                .filter(Item.feed_id == feed.id)
-                .order_by(Item.published_at.desc().nullslast(), Item.id.desc())
-                .limit(n)
-                .all()
-            )
-            lines = [f"Последние {len(items)} видео для ленты #{feed.id} ({feed.label or feed.url}):"]
-            for it in items:
-                when = (
-                    it.published_at.strftime("%Y-%m-%d")
-                    if it.published_at
-                    else (it.created_at.strftime("%Y-%m-%d") if it.created_at else "")
-                )
-                lines.append(f"• {it.title or '(без названия)'} ({when})\n{it.link or ''}")
-            text = "\n\n".join(lines) if items else "Нет элементов."
-            await message.answer(text)
-            return
-        # All feeds of user
-        rows = (
-            s.query(Item, Feed)
-            .join(Feed, Item.feed_id == Feed.id)
-            .filter(Feed.user_id == user_id)
-            .order_by(Item.published_at.desc().nullslast(), Item.id.desc())
-            .limit(n)
-            .all()
-        )
-        if not rows:
-            await message.answer("Нет элементов.")
-            return
-        lines = [f"Последние {n} видео по всем лентам (найдено {len(rows)}):"]
-        for it, f in rows:
-            when = (
-                it.published_at.strftime("%Y-%m-%d")
-                if it.published_at
-                else (it.created_at.strftime("%Y-%m-%d") if it.created_at else "")
-            )
-            lines.append(
-                f"• [{f.label or f.url}] {it.title or '(без названия)'} ({when})\n{it.link or ''}"
-            )
-        await message.answer("\n\n".join(lines))
+# Removed latest inspector
 
 
-@router.message(Command("backfill"))
-async def cmd_backfill(message: Message) -> None:
-    """Загрузить последние N элементов в БД без отправки сообщений.
-
-    Формат: /backfill <feed_id> [N=10]
-    """
-    user_id = _ensure_user_id(message)
-    if not user_id:
-        await message.answer("Доступ запрещен.")
-        return
-    parts = (message.text or "").split()
-    if len(parts) < 2:
-        await message.answer("Использование: /backfill <feed_id> [N=10]")
-        return
-    try:
-        feed_id = int(parts[1])
-    except Exception:
-        await message.answer("feed_id должно быть числом.")
-        return
-    n = 10
-    if len(parts) >= 3:
-        try:
-            n = int(parts[2])
-        except Exception:
-            pass
-    with session_scope() as s:
-        feed = s.get(Feed, feed_id)
-        if not feed or feed.user_id != user_id:
-            await message.answer("Лента не найдена.")
-            return
-    try:
-        created_ids = await fetch_and_store_recent(feed_id, n)
-        await message.answer(
-            f"Загружено новых элементов: {len(created_ids)}. Теперь можно использовать /latest {n} {feed_id}."
-        )
-    except Exception as e:
-        await message.answer(f"Ошибка backfill: {str(e)[:200]}")
+# Removed backfill utility
 
 
-@router.message(Command("dedupe"))
-async def cmd_dedupe(message: Message) -> None:
-    user_id = _ensure_user_id(message)
-    if not user_id:
-        await message.answer("Доступ запрещен.")
-        return
-    removed = _dedupe_user_feeds(user_id)
-    await message.answer(f"Удалено дублей: {removed}.")
+# Removed dedupe command; duplicates are handled on add

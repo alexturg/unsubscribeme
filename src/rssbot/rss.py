@@ -115,6 +115,14 @@ async def fetch_and_store_feed(feed_id: int) -> List[int]:
         f.http_etag = etag or f.http_etag
         f.http_last_modified = last_modified or f.http_last_modified
         f.last_poll_at = datetime.now(timezone.utc)
+        # Update feed name from parsed metadata if available
+        try:
+            feed_meta = parsed.get("feed")
+            feed_title = feed_meta.get("title") if isinstance(feed_meta, dict) else None
+            if feed_title:
+                f.name = feed_title
+        except Exception:
+            pass
 
         for e in entries:
             vid = _extract_video_id(e) or (e.get("id") or "").strip()
@@ -192,6 +200,13 @@ async def fetch_and_store_latest_item(feed_id: int) -> Optional[int]:
         f.http_etag = etag or f.http_etag
         f.http_last_modified = last_modified or f.http_last_modified
         f.last_poll_at = datetime.now(timezone.utc)
+        try:
+            feed_meta = parsed.get("feed")
+            feed_title = feed_meta.get("title") if isinstance(feed_meta, dict) else None
+            if feed_title:
+                f.name = feed_title
+        except Exception:
+            pass
 
         exists = (
             s.query(Item.id).filter(Item.feed_id == f.id, Item.external_id == vid).first()
