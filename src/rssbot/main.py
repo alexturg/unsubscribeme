@@ -12,6 +12,8 @@ from .config import Settings, ensure_data_dir
 from .db import Feed, init_engine, session_scope
 from .scheduler import BotScheduler
 from .rss import fetch_and_store_recent
+from . import web as webui
+from aiohttp import web
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -60,8 +62,18 @@ async def app() -> None:
 
         await _backfill_all(feed_ids)
 
+    # Start web UI
+    web_app = webui.create_app(settings, scheduler)
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, host=settings.WEB_HOST, port=settings.WEB_PORT)
+    await site.start()
+
     # Run bot
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await runner.cleanup()
 
 
 def main() -> None:

@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # Hide videos whose availability time is in the future
     HIDE_FUTURE_VIDEOS: bool = Field(default=False)
 
+    # Web UI host/port
+    WEB_HOST: str = Field(default="127.0.0.1", description="Host for built-in web UI")
+    WEB_PORT: int = Field(default=8080, description="Port for built-in web UI")
+
     def allowed_chat_ids(self) -> Optional[List[int]]:
         if not self.ALLOWED_CHAT_IDS:
             return None
