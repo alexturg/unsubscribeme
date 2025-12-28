@@ -244,9 +244,33 @@ async def _extract_youtube_channel_id(url: str) -> Optional[str]:
         handle = match.group(1)
         logging.info(f"Attempting to extract channel_id for handle: @{handle}")
         
-        # Method 1: Try RSS feed - YouTube sometimes redirects @handle to channel_id in RSS
+        # Method 0: Try YouTube oEmbed API (might work for some channels)
+        try:
+            oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/@{handle}&format=json"
+            logging.info(f"Trying oEmbed API: {oembed_url}")
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(oembed_url, allow_redirects=True) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # oEmbed doesn't directly give channel_id, but we can try to extract from author_url
+                        author_url = data.get('author_url', '')
+                        if author_url:
+                            channel_match = re.search(r'/channel/([a-zA-Z0-9_-]+)', author_url)
+                            if channel_match:
+                                channel_id = channel_match.group(1)
+                                if channel_id.startswith("UC") and len(channel_id) == 24:
+                                    logging.info(f"✓ Found channel_id via oEmbed: {channel_id}")
+                                    return channel_id
+        except Exception as e:
+            logging.info(f"oEmbed method failed: {type(e).__name__}: {str(e)[:100]}")
+        
+        # Method 1: Try RSS feed - different formats
+        # Note: @handle format might not work directly, but we try anyway
         rss_formats = [
             f"https://www.youtube.com/feeds/videos.xml?user=@{handle}",
+            # Alternative: try without @ symbol (sometimes works)
+            f"https://www.youtube.com/feeds/videos.xml?user={handle}",
         ]
         for rss_url in rss_formats:
             try:
@@ -335,16 +359,39 @@ async def _extract_youtube_channel_id(url: str) -> Optional[str]:
                         # Check if we got consent page - try to extract channel_id from redirect URL in consent page
                         if 'consent.youtube.com' in html:
                             logging.info("Detected consent page, trying to extract channel_id from redirect URLs...")
-                            # Consent page might have redirect URL with channel_id
-                            redirect_match = re.search(r'"(https?://[^"]*youtube\.com/[^"]*channel[^"]*)"', html)
-                            if redirect_match:
-                                redirect_url = redirect_match.group(1)
-                                channel_match = re.search(r'/channel/([a-zA-Z0-9_-]+)', redirect_url)
-                                if channel_match:
-                                    channel_id = channel_match.group(1)
-                                    if channel_id.startswith("UC") and len(channel_id) == 24:
-                                        logging.info(f"✓ Found channel_id in consent page redirect: {channel_id}")
-                                        return channel_id
+                            # Consent page might have redirect URL with channel_id - try multiple patterns
+                            patterns = [
+                                r'"(https?://[^"]*youtube\.com/[^"]*channel[^"]*)"',
+                                r'continue=([^"&]*youtube\.com[^"&]*channel[^"&]*)',
+                                r'url=([^"&]*youtube\.com[^"&]*channel[^"&]*)',
+                                r'/channel/([a-zA-Z0-9_-]{24})',
+                            ]
+                            for pattern in patterns:
+                                matches = re.finditer(pattern, html)
+                                for match in matches:
+                                    url_or_id = match.group(1) if match.lastindex else match.group(0)
+                                    # Check if it's a full URL or just channel_id
+                                    if url_or_id.startswith('http'):
+                                        channel_match = re.search(r'/channel/([a-zA-Z0-9_-]+)', url_or_id)
+                                        if channel_match:
+                                            channel_id = channel_match.group(1)
+                                            if channel_id.startswith("UC") and len(channel_id) == 24:
+                                                logging.info(f"✓ Found channel_id in consent page redirect: {channel_id}")
+                                                return channel_id
+                                    elif len(url_or_id) == 24 and url_or_id.startswith("UC"):
+                                        logging.info(f"✓ Found channel_id directly in consent page: {url_or_id}")
+                                        return url_or_id
+                            
+                            # Also try to find any UC* pattern in the HTML (more aggressive)
+                            all_uc_ids = re.findall(r'\b(UC[a-zA-Z0-9_-]{22})\b', html)
+                            for potential_id in set(all_uc_ids):
+                                if len(potential_id) == 24:
+                                    # Check context around this ID
+                                    idx = html.find(potential_id)
+                                    context = html[max(0, idx-100):min(len(html), idx+124)].lower()
+                                    if any(kw in context for kw in ['channel', 'youtube', 'redirect', 'continue']):
+                                        logging.info(f"✓ Found channel_id in consent page context: {potential_id}")
+                                        return potential_id
                         
                         # Pattern 1: "channelId":"UC..." (most common in JSON)
                         match = re.search(r'"channelId"\s*:\s*"([^"]+)"', html)
