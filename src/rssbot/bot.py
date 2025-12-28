@@ -251,8 +251,8 @@ async def _extract_youtube_channel_id(url: str) -> Optional[str]:
         for rss_url in rss_formats:
             try:
                 timeout = aiohttp.ClientTimeout(total=10)
-                async with aiohttp.ClientSession(timeout=timeout, allow_redirects=True) as session:
-                    async with session.get(rss_url) as resp:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(rss_url, allow_redirects=True) as resp:
                         logging.info(f"RSS feed attempt: {rss_url} -> status {resp.status}, final URL: {resp.url}")
                         final_url = str(resp.url)
                         # Check if redirected to channel_id format
@@ -289,8 +289,8 @@ async def _extract_youtube_channel_id(url: str) -> Optional[str]:
         try:
             channel_url = f"https://www.youtube.com/@{handle}"
             timeout = aiohttp.ClientTimeout(total=15)
-            async with aiohttp.ClientSession(timeout=timeout, allow_redirects=True) as session:
-                async with session.get(channel_url) as resp:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(channel_url, allow_redirects=True) as resp:
                     final_url = str(resp.url)
                     logging.info(f"Channel page redirect: {channel_url} -> {final_url}")
                     # Check if redirected to /channel/ID format
@@ -322,16 +322,37 @@ async def _extract_youtube_channel_id(url: str) -> Optional[str]:
                     if resp.status == 200:
                         html = await resp.text()
                         logging.info(f"HTML length: {len(html)}")
+                        # Check if we got consent page instead of actual page
+                        if 'consent.youtube.com' in html or 'ConsentUi' in html:
+                            logging.info("Got YouTube consent page, trying to bypass...")
+                            # Try with cookies or different approach
+                            # For now, try to extract from consent page redirect or use alternative method
+                            # Try RSS feed method which might work better
+                            pass
                         # Log first 500 chars to see what we got
-                        if len(html) > 0:
+                        if len(html) > 0 and 'consent.youtube.com' not in html:
                             logging.info(f"HTML preview (first 500 chars): {html[:500]}")
+                        # Check if we got consent page - try to extract channel_id from redirect URL in consent page
+                        if 'consent.youtube.com' in html:
+                            logging.info("Detected consent page, trying to extract channel_id from redirect URLs...")
+                            # Consent page might have redirect URL with channel_id
+                            redirect_match = re.search(r'"(https?://[^"]*youtube\.com/[^"]*channel[^"]*)"', html)
+                            if redirect_match:
+                                redirect_url = redirect_match.group(1)
+                                channel_match = re.search(r'/channel/([a-zA-Z0-9_-]+)', redirect_url)
+                                if channel_match:
+                                    channel_id = channel_match.group(1)
+                                    if channel_id.startswith("UC") and len(channel_id) == 24:
+                                        logging.info(f"✓ Found channel_id in consent page redirect: {channel_id}")
+                                        return channel_id
+                        
                         # Pattern 1: "channelId":"UC..." (most common in JSON)
                         match = re.search(r'"channelId"\s*:\s*"([^"]+)"', html)
                         if match:
                             channel_id = match.group(1)
                             # Validate it looks like a channel ID (starts with UC and is 24 chars)
                             if channel_id.startswith("UC") and len(channel_id) == 24:
-                                logging.info(f"Found channel_id via Pattern 1: {channel_id}")
+                                logging.info(f"✓ Found channel_id via Pattern 1: {channel_id}")
                                 return channel_id
                         
                         # Pattern 2: "externalId":"UC..." (alternative JSON field)
