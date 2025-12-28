@@ -1,7 +1,10 @@
 from __future__ import annotations
 import json
+import re
 from dataclasses import dataclass
 from typing import Optional
+
+import aiohttp
 
 from aiogram import Router
 from aiogram.filters import Command
@@ -65,7 +68,7 @@ async def cmd_start(message: Message) -> None:
     await message.answer(
         "Привет! Настраивать ленты теперь удобнее в веб-интерфейсе.\n"
         f"Открой: {web_link}\n\n"
-        "Команды: /addfeed, /channel, /playlist, /list, /remove, /setmode, /setfilter, /digest, /mute, /unmute"
+        "Команды: /addfeed, /youtube, /channel, /playlist, /list, /remove, /setmode, /setfilter, /digest, /mute, /unmute"
     )
 
 
@@ -207,6 +210,180 @@ def _dedupe_user_feeds(user_id: int) -> int:
         except Exception:
             pass
     return len(removed_ids)
+
+
+async def _extract_youtube_channel_id(url: str) -> Optional[str]:
+    """Extract YouTube channel_id from various URL formats.
+    
+    Supports:
+    - https://www.youtube.com/channel/CHANNEL_ID
+    - https://youtube.com/channel/CHANNEL_ID
+    - https://www.youtube.com/c/CHANNEL_NAME
+    - https://www.youtube.com/@CHANNEL_HANDLE
+    - https://www.youtube.com/user/USERNAME
+    
+    Returns channel_id or None if extraction fails.
+    """
+    # Normalize URL
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    
+    # Remove query parameters and fragments for parsing
+    url_clean = url.split("?")[0].split("#")[0]
+    
+    # Direct channel_id format: /channel/CHANNEL_ID
+    match = re.search(r"youtube\.com/channel/([a-zA-Z0-9_-]+)", url_clean)
+    if match:
+        return match.group(1)
+    
+    # Handle @handle format: /@CHANNEL_HANDLE
+    match = re.search(r"youtube\.com/@([a-zA-Z0-9_-]+)", url_clean)
+    if match:
+        handle = match.group(1)
+        # Need to fetch page to get channel_id
+        try:
+            channel_url = f"https://www.youtube.com/@{handle}"
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(channel_url) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+                        # Look for channel_id in various places in HTML
+                        # Pattern 1: "channelId":"UC..."
+                        match = re.search(r'"channelId"\s*:\s*"([^"]+)"', html)
+                        if match:
+                            return match.group(1)
+                        # Pattern 2: <link rel="canonical" href="https://www.youtube.com/channel/UC...">
+                        match = re.search(r'youtube\.com/channel/([a-zA-Z0-9_-]+)"', html)
+                        if match:
+                            return match.group(1)
+                        # Pattern 3: /channel/UC... in various meta tags
+                        match = re.search(r'/channel/([a-zA-Z0-9_-]{24})', html)
+                        if match:
+                            return match.group(1)
+        except Exception:
+            pass
+    
+    # Handle /c/ format: /c/CHANNEL_NAME
+    match = re.search(r"youtube\.com/c/([a-zA-Z0-9_-]+)", url_clean)
+    if match:
+        channel_name = match.group(1)
+        try:
+            channel_url = f"https://www.youtube.com/c/{channel_name}"
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(channel_url) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+                        # Look for channel_id in HTML
+                        match = re.search(r'"channelId"\s*:\s*"([^"]+)"', html)
+                        if match:
+                            return match.group(1)
+                        match = re.search(r'youtube\.com/channel/([a-zA-Z0-9_-]+)"', html)
+                        if match:
+                            return match.group(1)
+                        match = re.search(r'/channel/([a-zA-Z0-9_-]{24})', html)
+                        if match:
+                            return match.group(1)
+        except Exception:
+            pass
+    
+    # Handle /user/ format: /user/USERNAME
+    match = re.search(r"youtube\.com/user/([a-zA-Z0-9_-]+)", url_clean)
+    if match:
+        username = match.group(1)
+        try:
+            channel_url = f"https://www.youtube.com/user/{username}"
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(channel_url) as resp:
+                    if resp.status == 200:
+                        html = await resp.text()
+                        # Look for channel_id in HTML
+                        match = re.search(r'"channelId"\s*:\s*"([^"]+)"', html)
+                        if match:
+                            return match.group(1)
+                        match = re.search(r'youtube\.com/channel/([a-zA-Z0-9_-]+)"', html)
+                        if match:
+                            return match.group(1)
+                        match = re.search(r'/channel/([a-zA-Z0-9_-]{24})', html)
+                        if match:
+                            return match.group(1)
+        except Exception:
+            pass
+    
+    return None
+
+
+@router.message(Command("youtube"))
+async def cmd_youtube(message: Message) -> None:
+    """Добавить ленту YouTube по ссылке на канал.
+    
+    Автоматически определяет channel_id из различных форматов ссылок:
+    - https://www.youtube.com/channel/CHANNEL_ID
+    - https://www.youtube.com/@CHANNEL_HANDLE
+    - https://www.youtube.com/c/CHANNEL_NAME
+    - https://www.youtube.com/user/USERNAME
+    
+    Формат: /youtube <youtube_link> [mode=...] [label=...] [interval=10] [time=HH:MM]
+    """
+    user_id = _ensure_user_id(message)
+    if not user_id:
+        await message.answer("Доступ запрещен.")
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer(
+            "Использование: /youtube <youtube_link> [mode=immediate|digest|on_demand] [label=...] [interval=10] [time=HH:MM]\n\n"
+            "Поддерживаемые форматы ссылок:\n"
+            "- https://www.youtube.com/channel/CHANNEL_ID\n"
+            "- https://www.youtube.com/@CHANNEL_HANDLE\n"
+            "- https://www.youtube.com/c/CHANNEL_NAME\n"
+            "- https://www.youtube.com/user/USERNAME"
+        )
+        return
+    
+    # Extract URL and parse additional arguments
+    rest = parts[1]
+    # Split by spaces, URL is first part (may contain query params)
+    url_parts = rest.split()
+    youtube_url = url_parts[0]
+    
+    # Parse additional arguments
+    mode = "immediate"
+    label = None
+    interval = DEPS.settings.DEFAULT_POLL_INTERVAL_MIN
+    digest_time = DEPS.settings.DIGEST_DEFAULT_TIME
+    for a in url_parts[1:]:
+        aval = a.strip().lower()
+        if aval in ("immediate", "digest", "on_demand"):
+            mode = aval
+        elif a.startswith("mode="):
+            mode = a.split("=", 1)[1]
+        elif a.startswith("label="):
+            label = a.split("=", 1)[1]
+        elif a.startswith("interval="):
+            try:
+                interval = int(a.split("=", 1)[1])
+            except Exception:
+                pass
+        elif a.startswith("time="):
+            digest_time = a.split("=", 1)[1]
+    
+    # Extract channel_id
+    await message.answer("Определяю channel_id...")
+    channel_id = await _extract_youtube_channel_id(youtube_url)
+    
+    if not channel_id:
+        await message.answer(
+            f"Не удалось определить channel_id из ссылки: {youtube_url}\n"
+            "Убедитесь, что ссылка корректна, или используйте /channel с прямым channel_id."
+        )
+        return
+    
+    url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+    await _create_feed_and_seed_reply(message, user_id, url, mode, label, interval, digest_time)
 
 
 @router.message(Command("channel"))
