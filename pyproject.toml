@@ -33,4 +33,4 @@ test = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/rssbot"]
+packages = ["src/rssbot", "src/utils"]
