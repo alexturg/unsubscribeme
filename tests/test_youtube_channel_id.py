@@ -6,20 +6,25 @@ from rssbot.bot import _extract_youtube_channel_id
 
 def test_extract_channel_id_direct():
     """Test direct channel_id extraction from URL."""
+    test_channel_id = "UC1234567890123456789012"
     # Test with direct channel URL
     result = asyncio.run(_extract_youtube_channel_id("https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw"))
     assert result == "UC_x5XG1OV2P6uZZ5FSM9Ttw"
     
-    result = asyncio.run(_extract_youtube_channel_id("https://youtube.com/channel/UCtest1234567890123456"))
-    assert result == "UCtest1234567890123456"
+    result = asyncio.run(_extract_youtube_channel_id(f"https://youtube.com/channel/{test_channel_id}"))
+    assert result == test_channel_id
     
     # Test without protocol
-    result = asyncio.run(_extract_youtube_channel_id("youtube.com/channel/UCtest1234567890123456"))
-    assert result == "UCtest1234567890123456"
+    result = asyncio.run(_extract_youtube_channel_id(f"youtube.com/channel/{test_channel_id}"))
+    assert result == test_channel_id
     
     # Test with query parameters
-    result = asyncio.run(_extract_youtube_channel_id("https://www.youtube.com/channel/UCtest1234567890123456?feature=share"))
-    assert result == "UCtest1234567890123456"
+    result = asyncio.run(
+        _extract_youtube_channel_id(
+            f"https://www.youtube.com/channel/{test_channel_id}?feature=share"
+        )
+    )
+    assert result == test_channel_id
 
 
 def test_extract_channel_id_real_ibm():
