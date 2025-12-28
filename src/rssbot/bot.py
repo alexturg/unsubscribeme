@@ -242,15 +242,55 @@ async def _extract_youtube_channel_id(url: str) -> Optional[str]:
     match = re.search(r"youtube\.com/@([a-zA-Z0-9_-]+)", url_clean)
     if match:
         handle = match.group(1)
+        # Try RSS feed first (sometimes works for @handle)
+        try:
+            rss_url = f"https://www.youtube.com/feeds/videos.xml?user=@{handle}"
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(rss_url) as resp:
+                    if resp.status == 200:
+                        # Try to extract channel_id from RSS feed
+                        content = await resp.text()
+                        # RSS feed might redirect or contain channel_id in link
+                        match = re.search(r'channel_id=([a-zA-Z0-9_-]+)', content)
+                        if match:
+                            channel_id = match.group(1)
+                            if channel_id.startswith("UC") and len(channel_id) == 24:
+                                return channel_id
+        except Exception:
+            pass
+        
+        # Try to get channel_id from RSS feed URL redirect
+        try:
+            # Sometimes @handle redirects to /channel/ID
+            rss_redirect_url = f"https://www.youtube.com/feeds/videos.xml?user=@{handle}"
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout, allow_redirects=True) as session:
+                async with session.get(rss_redirect_url) as resp:
+                    # Check if final URL contains channel_id
+                    final_url = str(resp.url)
+                    match = re.search(r'channel_id=([a-zA-Z0-9_-]+)', final_url)
+                    if match:
+                        channel_id = match.group(1)
+                        if channel_id.startswith("UC") and len(channel_id) == 24:
+                            return channel_id
+        except Exception:
+            pass
+        
         # Need to fetch page to get channel_id
         try:
             channel_url = f"https://www.youtube.com/@{handle}"
-            timeout = aiohttp.ClientTimeout(total=15)
+            timeout = aiohttp.ClientTimeout(total=20)
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
             }
             async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-                async with session.get(channel_url) as resp:
+                async with session.get(channel_url, allow_redirects=True) as resp:
                     if resp.status == 200:
                         html = await resp.text()
                         # Pattern 1: "channelId":"UC..." (most common in JSON)
@@ -330,9 +370,59 @@ async def _extract_youtube_channel_id(url: str) -> Optional[str]:
                                 if any(keyword in context_before.lower() or keyword in context_after.lower() 
                                        for keyword in ['channel', 'channelid', 'externalid', 'browseid']):
                                     return potential_id
+                        
+                        # Pattern 9: More aggressive search - find all UC* patterns and check context
+                        # Look for patterns like "UC..." in various JSON structures
+                        all_uc_matches = re.finditer(r'["\']?([UC][a-zA-Z0-9_-]{23})["\']?', html)
+                        for match_obj in all_uc_matches:
+                            potential_id = match_obj.group(1)
+                            if potential_id.startswith("UC") and len(potential_id) == 24:
+                                # Get wider context
+                                start = max(0, match_obj.start() - 100)
+                                end = min(len(html), match_obj.end() + 100)
+                                context = html[start:end].lower()
+                                # Check for channel-related keywords
+                                if any(kw in context for kw in ['channel', 'id', 'browse', 'external', 'canonical', 'url']):
+                                    return potential_id
+                        
+                        # Pattern 10: Try to find in ytcfg (YouTube config object)
+                        match = re.search(r'ytcfg\.set\(({[^}]+})', html, re.DOTALL)
+                        if match:
+                            config_str = match.group(1)
+                            channel_match = re.search(r'"CHANNEL_ID"\s*:\s*"([^"]+)"', config_str)
+                            if channel_match:
+                                channel_id = channel_match.group(1)
+                                if channel_id.startswith("UC") and len(channel_id) == 24:
+                                    return channel_id
+                        
+                        # Pattern 11: Look in window.ytInitialPlayerResponse
+                        match = re.search(r'window\.ytInitialPlayerResponse\s*=\s*({.+?});', html, re.DOTALL)
+                        if match:
+                            player_data = match.group(1)
+                            channel_match = re.search(r'"channelId"\s*:\s*"([^"]+)"', player_data)
+                            if channel_match:
+                                channel_id = channel_match.group(1)
+                                if channel_id.startswith("UC") and len(channel_id) == 24:
+                                    return channel_id
+                        
+                        # Pattern 12: Last resort - find any valid-looking UC* ID near channel-related text
+                        # This is more permissive but should catch edge cases
+                        channel_id_pattern = r'\b(UC[a-zA-Z0-9_-]{22})\b'
+                        all_ids = re.findall(channel_id_pattern, html)
+                        # Filter by context - look for IDs that appear near channel-related content
+                        for cid in set(all_ids):  # Use set to avoid duplicates
+                            # Count occurrences and check if it appears in channel-related contexts
+                            occurrences = list(re.finditer(re.escape(cid), html))
+                            for occ in occurrences[:5]:  # Check first 5 occurrences
+                                start = max(0, occ.start() - 200)
+                                end = min(len(html), occ.end() + 200)
+                                context = html[start:end].lower()
+                                # If it appears near channel-related terms, it's likely the right one
+                                if any(term in context for term in ['channel', 'youtube.com/channel', 'channelid', 'browseid']):
+                                    return cid
         except Exception as e:
             # Log error for debugging but don't fail silently
-            logging.warning(f"Failed to extract channel_id from @handle: {e}")
+            logging.warning(f"Failed to extract channel_id from @handle {handle}: {type(e).__name__}: {e}")
             pass
     
     # Handle /c/ format: /c/CHANNEL_NAME
@@ -471,12 +561,22 @@ async def cmd_youtube(message: Message) -> None:
     
     # Extract channel_id
     await message.answer("Определяю channel_id...")
-    channel_id = await _extract_youtube_channel_id(youtube_url)
+    try:
+        channel_id = await _extract_youtube_channel_id(youtube_url)
+    except Exception as e:
+        logging.error(f"Error extracting channel_id from {youtube_url}: {e}", exc_info=True)
+        await message.answer(
+            f"Ошибка при определении channel_id: {str(e)[:100]}\n"
+            "Попробуйте использовать /channel с прямым channel_id."
+        )
+        return
     
     if not channel_id:
+        logging.warning(f"Could not extract channel_id from URL: {youtube_url}")
         await message.answer(
             f"Не удалось определить channel_id из ссылки: {youtube_url}\n"
-            "Убедитесь, что ссылка корректна, или используйте /channel с прямым channel_id."
+            "Убедитесь, что ссылка корректна, или используйте /channel с прямым channel_id.\n"
+            "Проверьте логи сервера для деталей."
         )
         return
     
