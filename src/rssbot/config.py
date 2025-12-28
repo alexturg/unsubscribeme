@@ -20,7 +20,8 @@ class Settings(BaseSettings):
     # Default timezone for digest scheduling (IANA TZ name, e.g., Europe/Moscow)
     TZ: str = Field(default="UTC", description="Default timezone for digests and scheduling")
 
-    # Path to SQLite database
+    # Path to SQLite database (example default for development)
+    # In production, set DB_PATH environment variable to your actual data directory path
     DB_PATH: Path = Field(default=Path("data/bot.sqlite"), description="Path to SQLite DB file")
 
     # Default polling interval for feeds (minutes)
