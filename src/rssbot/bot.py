@@ -242,42 +242,60 @@ async def _extract_youtube_channel_id(url: str) -> Optional[str]:
     match = re.search(r"youtube\.com/@([a-zA-Z0-9_-]+)", url_clean)
     if match:
         handle = match.group(1)
-        # Try RSS feed first (sometimes works for @handle)
-        try:
-            rss_url = f"https://www.youtube.com/feeds/videos.xml?user=@{handle}"
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(rss_url) as resp:
-                    if resp.status == 200:
-                        # Try to extract channel_id from RSS feed
-                        content = await resp.text()
-                        # RSS feed might redirect or contain channel_id in link
-                        match = re.search(r'channel_id=([a-zA-Z0-9_-]+)', content)
-                        if match:
-                            channel_id = match.group(1)
-                            if channel_id.startswith("UC") and len(channel_id) == 24:
-                                return channel_id
-        except Exception:
-            pass
+        logging.info(f"Attempting to extract channel_id for handle: @{handle}")
         
-        # Try to get channel_id from RSS feed URL redirect
+        # Method 1: Try RSS feed with different formats
+        rss_formats = [
+            f"https://www.youtube.com/feeds/videos.xml?user=@{handle}",
+            f"https://www.youtube.com/@{handle}/videos",
+        ]
+        for rss_url in rss_formats:
+            try:
+                timeout = aiohttp.ClientTimeout(total=10)
+                async with aiohttp.ClientSession(timeout=timeout, allow_redirects=True) as session:
+                    async with session.get(rss_url) as resp:
+                        logging.debug(f"RSS feed attempt: {rss_url} -> status {resp.status}, final URL: {resp.url}")
+                        if resp.status == 200:
+                            content = await resp.text()
+                            # Check final URL for channel_id
+                            final_url = str(resp.url)
+                            url_match = re.search(r'channel_id=([a-zA-Z0-9_-]+)', final_url)
+                            if url_match:
+                                channel_id = url_match.group(1)
+                                if channel_id.startswith("UC") and len(channel_id) == 24:
+                                    logging.info(f"Found channel_id via RSS redirect: {channel_id}")
+                                    return channel_id
+                            # Check content for channel_id
+                            content_match = re.search(r'channel_id=([a-zA-Z0-9_-]+)', content)
+                            if content_match:
+                                channel_id = content_match.group(1)
+                                if channel_id.startswith("UC") and len(channel_id) == 24:
+                                    logging.info(f"Found channel_id in RSS content: {channel_id}")
+                                    return channel_id
+            except Exception as e:
+                logging.debug(f"RSS feed method failed for {rss_url}: {e}")
+                continue
+        
+        # Method 2: Try to access channel page and check redirect
         try:
-            # Sometimes @handle redirects to /channel/ID
-            rss_redirect_url = f"https://www.youtube.com/feeds/videos.xml?user=@{handle}"
-            timeout = aiohttp.ClientTimeout(total=10)
+            channel_url = f"https://www.youtube.com/@{handle}"
+            timeout = aiohttp.ClientTimeout(total=15)
             async with aiohttp.ClientSession(timeout=timeout, allow_redirects=True) as session:
-                async with session.get(rss_redirect_url) as resp:
-                    # Check if final URL contains channel_id
+                async with session.get(channel_url) as resp:
                     final_url = str(resp.url)
-                    match = re.search(r'channel_id=([a-zA-Z0-9_-]+)', final_url)
-                    if match:
-                        channel_id = match.group(1)
+                    logging.debug(f"Channel page redirect: {channel_url} -> {final_url}")
+                    # Check if redirected to /channel/ID format
+                    channel_match = re.search(r'youtube\.com/channel/([a-zA-Z0-9_-]+)', final_url)
+                    if channel_match:
+                        channel_id = channel_match.group(1)
                         if channel_id.startswith("UC") and len(channel_id) == 24:
+                            logging.info(f"Found channel_id via redirect: {channel_id}")
                             return channel_id
-        except Exception:
+        except Exception as e:
+            logging.debug(f"Redirect method failed: {e}")
             pass
         
-        # Need to fetch page to get channel_id
+        # Method 3: Parse HTML from channel page
         try:
             channel_url = f"https://www.youtube.com/@{handle}"
             timeout = aiohttp.ClientTimeout(total=20)
@@ -291,14 +309,17 @@ async def _extract_youtube_channel_id(url: str) -> Optional[str]:
             }
             async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                 async with session.get(channel_url, allow_redirects=True) as resp:
+                    logging.debug(f"HTML fetch: {channel_url} -> status {resp.status}")
                     if resp.status == 200:
                         html = await resp.text()
+                        logging.debug(f"HTML length: {len(html)}")
                         # Pattern 1: "channelId":"UC..." (most common in JSON)
                         match = re.search(r'"channelId"\s*:\s*"([^"]+)"', html)
                         if match:
                             channel_id = match.group(1)
                             # Validate it looks like a channel ID (starts with UC and is 24 chars)
                             if channel_id.startswith("UC") and len(channel_id) == 24:
+                                logging.info(f"Found channel_id via Pattern 1: {channel_id}")
                                 return channel_id
                         
                         # Pattern 2: "externalId":"UC..." (alternative JSON field)
@@ -422,8 +443,10 @@ async def _extract_youtube_channel_id(url: str) -> Optional[str]:
                                     return cid
         except Exception as e:
             # Log error for debugging but don't fail silently
-            logging.warning(f"Failed to extract channel_id from @handle {handle}: {type(e).__name__}: {e}")
+            logging.warning(f"Failed to extract channel_id from @handle {handle}: {type(e).__name__}: {e}", exc_info=True)
             pass
+        
+        logging.warning(f"All methods failed to extract channel_id for @{handle}")
     
     # Handle /c/ format: /c/CHANNEL_NAME
     match = re.search(r"youtube\.com/c/([a-zA-Z0-9_-]+)", url_clean)
