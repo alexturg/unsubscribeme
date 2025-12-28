@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -244,25 +245,94 @@ async def _extract_youtube_channel_id(url: str) -> Optional[str]:
         # Need to fetch page to get channel_id
         try:
             channel_url = f"https://www.youtube.com/@{handle}"
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            timeout = aiohttp.ClientTimeout(total=15)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                 async with session.get(channel_url) as resp:
                     if resp.status == 200:
                         html = await resp.text()
-                        # Look for channel_id in various places in HTML
-                        # Pattern 1: "channelId":"UC..."
+                        # Pattern 1: "channelId":"UC..." (most common in JSON)
                         match = re.search(r'"channelId"\s*:\s*"([^"]+)"', html)
                         if match:
-                            return match.group(1)
-                        # Pattern 2: <link rel="canonical" href="https://www.youtube.com/channel/UC...">
-                        match = re.search(r'youtube\.com/channel/([a-zA-Z0-9_-]+)"', html)
+                            channel_id = match.group(1)
+                            # Validate it looks like a channel ID (starts with UC and is 24 chars)
+                            if channel_id.startswith("UC") and len(channel_id) == 24:
+                                return channel_id
+                        
+                        # Pattern 2: "externalId":"UC..." (alternative JSON field)
+                        match = re.search(r'"externalId"\s*:\s*"([^"]+)"', html)
+                        if match:
+                            channel_id = match.group(1)
+                            if channel_id.startswith("UC") and len(channel_id) == 24:
+                                return channel_id
+                        
+                        # Pattern 3: <link rel="canonical" href="https://www.youtube.com/channel/UC...">
+                        match = re.search(r'youtube\.com/channel/([a-zA-Z0-9_-]{24})', html)
+                        if match:
+                            channel_id = match.group(1)
+                            if channel_id.startswith("UC"):
+                                return channel_id
+                        
+                        # Pattern 4: /channel/UC... in various places (more flexible)
+                        match = re.search(r'/channel/(UC[a-zA-Z0-9_-]{22})', html)
                         if match:
                             return match.group(1)
-                        # Pattern 3: /channel/UC... in various meta tags
-                        match = re.search(r'/channel/([a-zA-Z0-9_-]{24})', html)
+                        
+                        # Pattern 5: Search in JSON-LD structured data
+                        match = re.search(r'"@type"\s*:\s*"Person"[^}]*"identifier"\s*:\s*"([^"]+)"', html)
                         if match:
-                            return match.group(1)
-        except Exception:
+                            identifier = match.group(1)
+                            if identifier.startswith("UC") and len(identifier) == 24:
+                                return identifier
+                        
+                        # Pattern 6: Look for var ytInitialData or window["ytInitialData"] (improved)
+                        # Try multiple patterns for ytInitialData
+                        patterns = [
+                            r'var\s+ytInitialData\s*=\s*({.+?});',
+                            r'window\[["\']ytInitialData["\']]\s*=\s*({.+?});',
+                            r'ytInitialData\s*=\s*({.+?});\s*</script>',
+                        ]
+                        for pattern in patterns:
+                            match = re.search(pattern, html, re.DOTALL)
+                            if match:
+                                json_str = match.group(1)
+                                # Try multiple nested paths in the JSON
+                                channel_patterns = [
+                                    r'"channelId"\s*:\s*"([^"]+)"',
+                                    r'"externalId"\s*:\s*"([^"]+)"',
+                                    r'"browseId"\s*:\s*"([^"]+)"',  # Sometimes channelId is here
+                                ]
+                                for cp in channel_patterns:
+                                    channel_match = re.search(cp, json_str)
+                                    if channel_match:
+                                        channel_id = channel_match.group(1)
+                                        if channel_id.startswith("UC") and len(channel_id) == 24:
+                                            return channel_id
+                        
+                        # Pattern 7: Try to find in meta tags
+                        match = re.search(r'<meta\s+property="og:url"\s+content="https://www\.youtube\.com/channel/([^"]+)"', html)
+                        if match:
+                            channel_id = match.group(1)
+                            if channel_id.startswith("UC") and len(channel_id) == 24:
+                                return channel_id
+                        
+                        # Pattern 8: Search for any UC followed by 22 alphanumeric chars (standard channel ID format)
+                        matches = re.findall(r'(UC[a-zA-Z0-9_-]{22})', html)
+                        for potential_id in matches:
+                            # Validate it's likely a channel ID (not part of another string)
+                            if len(potential_id) == 24:
+                                # Check if it's in a context that suggests it's a channel ID
+                                idx = html.find(potential_id)
+                                context_before = html[max(0, idx-50):idx]
+                                context_after = html[idx:min(len(html), idx+74)]
+                                if any(keyword in context_before.lower() or keyword in context_after.lower() 
+                                       for keyword in ['channel', 'channelid', 'externalid', 'browseid']):
+                                    return potential_id
+        except Exception as e:
+            # Log error for debugging but don't fail silently
+            logging.warning(f"Failed to extract channel_id from @handle: {e}")
             pass
     
     # Handle /c/ format: /c/CHANNEL_NAME
@@ -271,22 +341,36 @@ async def _extract_youtube_channel_id(url: str) -> Optional[str]:
         channel_name = match.group(1)
         try:
             channel_url = f"https://www.youtube.com/c/{channel_name}"
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            timeout = aiohttp.ClientTimeout(total=15)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                 async with session.get(channel_url) as resp:
                     if resp.status == 200:
                         html = await resp.text()
-                        # Look for channel_id in HTML
+                        # Pattern 1: "channelId":"UC..."
                         match = re.search(r'"channelId"\s*:\s*"([^"]+)"', html)
                         if match:
-                            return match.group(1)
-                        match = re.search(r'youtube\.com/channel/([a-zA-Z0-9_-]+)"', html)
+                            channel_id = match.group(1)
+                            if channel_id.startswith("UC") and len(channel_id) == 24:
+                                return channel_id
+                        # Pattern 2: "externalId":"UC..."
+                        match = re.search(r'"externalId"\s*:\s*"([^"]+)"', html)
+                        if match:
+                            channel_id = match.group(1)
+                            if channel_id.startswith("UC") and len(channel_id) == 24:
+                                return channel_id
+                        # Pattern 3: canonical link
+                        match = re.search(r'youtube\.com/channel/(UC[a-zA-Z0-9_-]{22})', html)
                         if match:
                             return match.group(1)
-                        match = re.search(r'/channel/([a-zA-Z0-9_-]{24})', html)
+                        # Pattern 4: /channel/UC...
+                        match = re.search(r'/channel/(UC[a-zA-Z0-9_-]{22})', html)
                         if match:
                             return match.group(1)
-        except Exception:
+        except Exception as e:
+            logging.warning(f"Failed to extract channel_id from /c/ format: {e}")
             pass
     
     # Handle /user/ format: /user/USERNAME
@@ -295,22 +379,36 @@ async def _extract_youtube_channel_id(url: str) -> Optional[str]:
         username = match.group(1)
         try:
             channel_url = f"https://www.youtube.com/user/{username}"
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            timeout = aiohttp.ClientTimeout(total=15)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                 async with session.get(channel_url) as resp:
                     if resp.status == 200:
                         html = await resp.text()
-                        # Look for channel_id in HTML
+                        # Pattern 1: "channelId":"UC..."
                         match = re.search(r'"channelId"\s*:\s*"([^"]+)"', html)
                         if match:
-                            return match.group(1)
-                        match = re.search(r'youtube\.com/channel/([a-zA-Z0-9_-]+)"', html)
+                            channel_id = match.group(1)
+                            if channel_id.startswith("UC") and len(channel_id) == 24:
+                                return channel_id
+                        # Pattern 2: "externalId":"UC..."
+                        match = re.search(r'"externalId"\s*:\s*"([^"]+)"', html)
+                        if match:
+                            channel_id = match.group(1)
+                            if channel_id.startswith("UC") and len(channel_id) == 24:
+                                return channel_id
+                        # Pattern 3: canonical link
+                        match = re.search(r'youtube\.com/channel/(UC[a-zA-Z0-9_-]{22})', html)
                         if match:
                             return match.group(1)
-                        match = re.search(r'/channel/([a-zA-Z0-9_-]{24})', html)
+                        # Pattern 4: /channel/UC...
+                        match = re.search(r'/channel/(UC[a-zA-Z0-9_-]{22})', html)
                         if match:
                             return match.group(1)
-        except Exception:
+        except Exception as e:
+            logging.warning(f"Failed to extract channel_id from /user/ format: {e}")
             pass
     
     return None
