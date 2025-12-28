@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 from dataclasses import dataclass
 from typing import Optional
 
@@ -64,8 +65,7 @@ async def cmd_start(message: Message) -> None:
     await message.answer(
         "Привет! Настраивать ленты теперь удобнее в веб-интерфейсе.\n"
         f"Открой: {web_link}\n\n"
-        "В боте доступны: быстрые добавления и переключение расписания.\n"
-        "Команды: /channel, /playlist, /setmode"
+        "Команды: /addfeed, /channel, /playlist, /list, /remove, /setmode, /setfilter, /digest, /mute, /unmute"
     )
 
 
@@ -289,7 +289,94 @@ async def cmd_playlist(message: Message) -> None:
     await _create_feed_and_seed_reply(message, user_id, url, mode, label, interval, digest_time)
 
 
-# Removed list/remove/mute/unmute; web UI handles management
+@router.message(Command("addfeed"))
+async def cmd_addfeed(message: Message) -> None:
+    """Добавить ленту по URL.
+
+    Формат: /addfeed <url> [mode=immediate|digest|on_demand] [label=...] [interval=10] [time=HH:MM]
+    """
+    user_id = _ensure_user_id(message)
+    if not user_id:
+        await message.answer("Доступ запрещен.")
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer(
+            "Использование: /addfeed <url> [mode=immediate|digest|on_demand] [label=...] [interval=10] [time=HH:MM]"
+        )
+        return
+    url = parts[1]
+    mode = "immediate"
+    label = None
+    interval = DEPS.settings.DEFAULT_POLL_INTERVAL_MIN
+    digest_time = DEPS.settings.DIGEST_DEFAULT_TIME
+    for a in parts[2:]:
+        aval = a.strip().lower()
+        if aval in ("immediate", "digest", "on_demand"):
+            mode = aval
+        elif a.startswith("mode="):
+            mode = a.split("=", 1)[1]
+        elif a.startswith("label="):
+            label = a.split("=", 1)[1]
+        elif a.startswith("interval="):
+            try:
+                interval = int(a.split("=", 1)[1])
+            except Exception:
+                pass
+        elif a.startswith("time="):
+            digest_time = a.split("=", 1)[1]
+    await _create_feed_and_seed_reply(message, user_id, url, mode, label, interval, digest_time)
+
+
+@router.message(Command("list"))
+async def cmd_list(message: Message) -> None:
+    """Показать список лент пользователя."""
+    user_id = _ensure_user_id(message)
+    if not user_id:
+        await message.answer("Доступ запрещен.")
+        return
+    with session_scope() as s:
+        feeds = s.query(Feed).filter(Feed.user_id == user_id).order_by(Feed.id.asc()).all()
+        if not feeds:
+            await message.answer("У вас нет лент. Используйте /addfeed, /channel или /playlist для добавления.")
+            return
+        lines = ["Ваши ленты:"]
+        for f in feeds:
+            status = "✓" if f.enabled else "✗"
+            display_name = f.label or f.name or f.url[:50]
+            time_part = f" в {f.digest_time_local}" if f.digest_time_local else ""
+            lines.append(
+                f"{status} {f.id}: {display_name} — {f.mode}{time_part}"
+            )
+        await message.answer("\n".join(lines))
+
+
+@router.message(Command("remove"))
+async def cmd_remove(message: Message) -> None:
+    """Удалить ленту."""
+    user_id = _ensure_user_id(message)
+    if not user_id:
+        await message.answer("Доступ запрещен.")
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Использование: /remove <feed_id>")
+        return
+    try:
+        feed_id = int(parts[1])
+    except Exception:
+        await message.answer("Неверный id.")
+        return
+    with session_scope() as s:
+        feed = s.get(Feed, feed_id)
+        if not feed or feed.user_id != user_id:
+            await message.answer("Лента не найдена.")
+            return
+        # Unschedule polling
+        DEPS.scheduler.unschedule_feed_poll(feed_id)
+        # Delete feed (cascade will handle related items/deliveries/rules)
+        s.delete(feed)
+    await message.answer(f"Лента {feed_id} удалена.")
 
 
 @router.message(Command("setmode"))
@@ -328,10 +415,157 @@ async def cmd_setmode(message: Message) -> None:
     await message.answer("Режим обновлён.")
 
 
-# Removed setfilter; filters may be added to web UI later
+@router.message(Command("setfilter"))
+async def cmd_setfilter(message: Message) -> None:
+    """Установить фильтры для ленты.
+
+    Формат: /setfilter <feed_id> <json>
+    Пример: /setfilter 1 {"include_keywords": ["обзор"], "exclude_keywords": ["стрим"]}
+    """
+    user_id = _ensure_user_id(message)
+    if not user_id:
+        await message.answer("Доступ запрещен.")
+        return
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 3:
+        await message.answer(
+            'Использование: /setfilter <feed_id> <json>\n'
+            'Пример: /setfilter 1 {"include_keywords": ["обзор"], "exclude_keywords": ["стрим"]}'
+        )
+        return
+    try:
+        feed_id = int(parts[1])
+    except Exception:
+        await message.answer("Неверный id.")
+        return
+    try:
+        filter_data = json.loads(parts[2])
+    except json.JSONDecodeError as e:
+        await message.answer(f"Неверный JSON: {str(e)}")
+        return
+    with session_scope() as s:
+        feed = s.get(Feed, feed_id)
+        if not feed or feed.user_id != user_id:
+            await message.answer("Лента не найдена.")
+            return
+        # Get or create rules
+        rules = feed.rules
+        if not rules:
+            rules = FeedRule(feed_id=feed_id)
+            s.add(rules)
+        # Update rules from JSON
+        if "include_keywords" in filter_data:
+            rules.include_keywords = filter_data["include_keywords"]
+        if "exclude_keywords" in filter_data:
+            rules.exclude_keywords = filter_data["exclude_keywords"]
+        if "include_regex" in filter_data:
+            rules.include_regex = filter_data["include_regex"]
+        if "exclude_regex" in filter_data:
+            rules.exclude_regex = filter_data["exclude_regex"]
+        if "require_all" in filter_data:
+            rules.require_all = bool(filter_data["require_all"])
+        if "case_sensitive" in filter_data:
+            rules.case_sensitive = bool(filter_data["case_sensitive"])
+        if "categories" in filter_data:
+            rules.categories = filter_data["categories"]
+        if "min_duration_sec" in filter_data:
+            rules.min_duration_sec = filter_data["min_duration_sec"]
+        if "max_duration_sec" in filter_data:
+            rules.max_duration_sec = filter_data["max_duration_sec"]
+    await message.answer("Фильтры обновлены.")
 
 
-# Removed manual digest trigger
+@router.message(Command("digest"))
+async def cmd_digest(message: Message) -> None:
+    """Запустить дайджест вручную.
+
+    Формат: /digest [feed_id|all]
+    """
+    user_id = _ensure_user_id(message)
+    if not user_id:
+        await message.answer("Доступ запрещен.")
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Использование: /digest <feed_id|all>")
+        return
+    arg = parts[1].lower()
+    with session_scope() as s:
+        if arg == "all":
+            feeds = s.query(Feed).filter(Feed.user_id == user_id, Feed.enabled == True).all()
+            feed_ids = [f.id for f in feeds]
+        else:
+            try:
+                feed_id = int(arg)
+            except Exception:
+                await message.answer("Неверный id.")
+                return
+            feed = s.get(Feed, feed_id)
+            if not feed or feed.user_id != user_id:
+                await message.answer("Лента не найдена.")
+                return
+            feed_ids = [feed_id]
+    if not feed_ids:
+        await message.answer("Нет активных лент для дайджеста.")
+        return
+    # Send digest for each feed
+    for fid in feed_ids:
+        await DEPS.scheduler._send_digest_for_feed(fid)
+    await message.answer(f"Дайджест отправлен для {len(feed_ids)} лент.")
+
+
+@router.message(Command("mute"))
+async def cmd_mute(message: Message) -> None:
+    """Отключить ленту (временно)."""
+    user_id = _ensure_user_id(message)
+    if not user_id:
+        await message.answer("Доступ запрещен.")
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Использование: /mute <feed_id>")
+        return
+    try:
+        feed_id = int(parts[1])
+    except Exception:
+        await message.answer("Неверный id.")
+        return
+    with session_scope() as s:
+        feed = s.get(Feed, feed_id)
+        if not feed or feed.user_id != user_id:
+            await message.answer("Лента не найдена.")
+            return
+        feed.enabled = False
+        # Unschedule polling
+        DEPS.scheduler.unschedule_feed_poll(feed_id)
+    await message.answer(f"Лента {feed_id} отключена.")
+
+
+@router.message(Command("unmute"))
+async def cmd_unmute(message: Message) -> None:
+    """Включить ленту."""
+    user_id = _ensure_user_id(message)
+    if not user_id:
+        await message.answer("Доступ запрещен.")
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Использование: /unmute <feed_id>")
+        return
+    try:
+        feed_id = int(parts[1])
+    except Exception:
+        await message.answer("Неверный id.")
+        return
+    with session_scope() as s:
+        feed = s.get(Feed, feed_id)
+        if not feed or feed.user_id != user_id:
+            await message.answer("Лента не найдена.")
+            return
+        feed.enabled = True
+        # Reschedule polling
+        DEPS.scheduler.schedule_feed_poll(feed_id, feed.poll_interval_min)
+    await message.answer(f"Лента {feed_id} включена.")
 
 
 # Removed latest inspector
