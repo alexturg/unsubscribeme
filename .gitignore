@@ -208,3 +208,5 @@ __marimo__/
 
 
 .env
+.DS_Store
+*.DS_Store
