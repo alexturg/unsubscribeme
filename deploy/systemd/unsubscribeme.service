@@ -5,18 +5,18 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Замените на пользователя, под которым должен работать бот
-User=YOUR_USER
-Group=YOUR_USER
+# Пользователь, под которым работает бот (рекомендуется отдельный)
+User=unsubscribeme
+Group=unsubscribeme
 
 # Рабочая директория — путь до клон‑репозитория на сервере
-WorkingDirectory=/opt/unsubscribeme
+WorkingDirectory=/home/unsubscribeme/unsubscribeme
 
 # Файл окружения с токеном и настройками
-EnvironmentFile=/opt/unsubscribeme/.env
+EnvironmentFile=/home/unsubscribeme/unsubscribeme/.env
 
 # Путь до исполняемого файла в venv
-ExecStart=/opt/unsubscribeme/.venv/bin/unsubscribeme
+ExecStart=/home/unsubscribeme/unsubscribeme/.venv/bin/unsubscribeme
 Restart=always
 RestartSec=5s
 
@@ -29,4 +29,3 @@ LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
-
