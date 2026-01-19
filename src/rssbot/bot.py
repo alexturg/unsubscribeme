@@ -493,18 +493,70 @@ async def cmd_setmode(message: Message) -> None:
         return
     parts = (message.text or "").split()
     if len(parts) < 3:
-        await message.answer("Использование: /setmode <feed_id> <mode> [time=HH:MM]")
+        await message.answer("Использование: /setmode <feed_id> <mode> [HH:MM]")
         return
     try:
         feed_id = int(parts[1])
     except Exception:
         await message.answer("Неверный id.")
         return
-    mode = parts[2]
-    digest_time = None
+
+    mode = parts[2].strip().lower()
+    allowed_modes = {"immediate", "digest", "on_demand"}
+    if mode not in allowed_modes:
+        await message.answer("Неверный режим. Доступные: immediate, digest, on_demand.")
+        return
+
+    def _normalize_hhmm(value: str) -> Optional[str]:
+        if ":" not in value:
+            return None
+        hh, mm = value.split(":", 1)
+        if not (hh.isdigit() and mm.isdigit()):
+            return None
+        if len(mm) != 2:
+            return None
+        try:
+            h = int(hh)
+            m = int(mm)
+        except Exception:
+            return None
+        if h < 0 or h > 23 or m < 0 or m > 59:
+            return None
+        return f"{h:02d}:{m:02d}"
+
+    digest_time_raw = None
+    digest_time_provided = False
+    extra_parts: list[str] = []
     for p in parts[3:]:
         if p.startswith("time="):
-            digest_time = p.split("=", 1)[1] or None
+            digest_time_provided = True
+            digest_time_raw = p.split("=", 1)[1].strip()
+        else:
+            normalized = _normalize_hhmm(p.strip())
+            if normalized:
+                if digest_time_provided:
+                    extra_parts.append(p)
+                else:
+                    digest_time_provided = True
+                    digest_time_raw = p.strip()
+            else:
+                extra_parts.append(p)
+
+    if extra_parts:
+        await message.answer(
+            "Неверные параметры: " + " ".join(extra_parts) + ". Формат: /setmode <feed_id> <mode> [HH:MM]"
+        )
+        return
+
+    digest_time = None
+    if digest_time_provided:
+        digest_time = _normalize_hhmm(digest_time_raw or "")
+        if not digest_time:
+            await message.answer("Неверный формат времени. Используйте HH:MM, например 23:00.")
+            return
+        if mode != "digest":
+            await message.answer("Время можно задавать только для режима digest.")
+            return
     with session_scope() as s:
         feed = s.get(Feed, feed_id)
         if not feed or feed.user_id != user_id:
@@ -512,16 +564,21 @@ async def cmd_setmode(message: Message) -> None:
             return
         feed.mode = mode
         if mode == "digest":
-            if digest_time:
+            if digest_time_provided:
                 feed.digest_time_local = digest_time
             elif not feed.digest_time_local:
                 feed.digest_time_local = DEPS.settings.DIGEST_DEFAULT_TIME
         else:
             feed.digest_time_local = None
         interval = feed.poll_interval_min
+        new_mode = feed.mode
+        new_time = feed.digest_time_local
     # Reschedule polling job (unchanged interval)
     DEPS.scheduler.schedule_feed_poll(feed_id, interval)
-    await message.answer("Режим обновлён.")
+    if new_mode == "digest":
+        await message.answer(f"Режим обновлён для ленты {feed_id}: digest, время {new_time}.")
+    else:
+        await message.answer(f"Режим обновлён для ленты {feed_id}: {new_mode}.")
 
 
 @router.message(Command("setfilter"))
