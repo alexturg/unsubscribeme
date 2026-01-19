@@ -607,7 +607,7 @@ async def cmd_digest(message: Message) -> None:
         return
     # Send digest for each feed
     for fid in feed_ids:
-        await DEPS.scheduler._send_digest_for_feed(fid)
+        await DEPS.scheduler._send_digest_for_feed(fid, update_last_digest_at=False)
     await message.answer(f"Дайджест отправлен для {len(feed_ids)} лент.")
 
 

@@ -71,6 +71,17 @@ class BotScheduler:
         for item_id in new_ids:
             await self._maybe_deliver_immediate(item_id)
 
+    async def _send_video_message(
+        self, chat_id: int, title: str, link: str
+    ) -> tuple[str, Optional[str]]:
+        text = f"Новый ролик: {title}"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть", url=link)]])
+        try:
+            await self.ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+            return "ok", None
+        except Exception as e:
+            return "fail", str(e)[:1000]
+
     async def _maybe_deliver_immediate(self, item_id: int) -> None:
         with session_scope() as s:
             item = s.get(Item, item_id)
@@ -119,15 +130,7 @@ class BotScheduler:
             link = item.link or ""
 
         # Send message outside of transaction
-        text = f"Новый ролик: {title}"
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть", url=link)]])
-        try:
-            await self.ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
-            status = "ok"
-            error = None
-        except Exception as e:
-            status = "fail"
-            error = str(e)[:1000]
+        status, error = await self._send_video_message(chat_id, title, link)
 
         with session_scope() as s:
             s.add(
@@ -171,7 +174,9 @@ class BotScheduler:
                     continue
             await self._send_digest_for_feed(feed.id)
 
-    async def _send_digest_for_feed(self, feed_id: int) -> None:
+    async def _send_digest_for_feed(
+        self, feed_id: int, *, update_last_digest_at: bool = True
+    ) -> None:
         with session_scope() as s:
             feed = s.get(Feed, feed_id)
             if not feed:
@@ -235,44 +240,46 @@ class BotScheduler:
             feed_id_v = feed.id
 
         if not kept_info:
-            with session_scope() as s:
-                f = s.get(Feed, feed_id)
-                f.last_digest_at = datetime.now(timezone.utc)
+            if update_last_digest_at:
+                with session_scope() as s:
+                    f = s.get(Feed, feed_id)
+                    if f:
+                        f.last_digest_at = datetime.now(timezone.utc)
             return
 
         kept_info = kept_info[:20]
-        lines = ["Дайджест новых видео:"]
+        send_results = []
         for info in kept_info:
-            when = info["published_at"].astimezone(timezone.utc).strftime("%Y-%m-%d") if info["published_at"] else ""
-            lines.append(f"• {info['title']} ({when})\n{info['link']}")
-        text = "\n\n".join(lines)
-
-        try:
-            await self.ctx.bot.send_message(chat_id=chat_id, text=text)
-            status = "ok"
-            error = None
-        except Exception as e:
-            status = "fail"
-            error = str(e)[:1000]
+            status, error = await self._send_video_message(chat_id, info["title"], info["link"])
+            send_results.append(
+                {
+                    "id": info["id"],
+                    "status": status,
+                    "error": error,
+                    "sent_at": datetime.now(timezone.utc),
+                }
+            )
 
         now = datetime.now(timezone.utc)
         with session_scope() as s:
             # find user id for chat_id
             user_id_v = s.query(User.id).filter(User.chat_id == chat_id).scalar()
-            for info in kept_info:
+            for result in send_results:
                 s.add(
                     Delivery(
-                        item_id=info["id"],
+                        item_id=result["id"],
                         feed_id=feed_id_v,
                         user_id=user_id_v,
                         channel="digest",
-                        status=status,
-                        error_message=error,
-                        sent_at=now,
+                        status=result["status"],
+                        error_message=result["error"],
+                        sent_at=result["sent_at"],
                     )
                 )
-            f = s.get(Feed, feed_id)
-            f.last_digest_at = now
+            if update_last_digest_at:
+                f = s.get(Feed, feed_id)
+                if f:
+                    f.last_digest_at = now
 
     async def _send_item_once_ignore_mode(self, item_id: int) -> tuple[bool, str]:
         """Send a single item immediately regardless of feed mode.
@@ -309,18 +316,10 @@ class BotScheduler:
             user_id_v = user.id
             feed_id_v = feed.id
             title = item.title or "(без названия)"
-            link = item.link or ""
-            is_digest_mode = feed.mode == "digest"
+        link = item.link or ""
+        is_digest_mode = feed.mode == "digest"
 
-        text = f"Новый ролик: {title}"
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть", url=link)]])
-        try:
-            await self.ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
-            status = "ok"
-            error = None
-        except Exception as e:
-            status = "fail"
-            error = str(e)[:1000]
+        status, error = await self._send_video_message(chat_id, title, link)
 
         now = datetime.now(timezone.utc)
         with session_scope() as s:
