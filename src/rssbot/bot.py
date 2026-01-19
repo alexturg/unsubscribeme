@@ -99,11 +99,20 @@ async def _create_feed_and_seed_reply(
             existing.mode = mode
             existing.label = label
             existing.poll_interval_min = interval
-            existing.digest_time_local = digest_time if mode == "digest" else None
+            if mode == "digest":
+                if digest_time:
+                    existing.digest_time_local = digest_time
+                elif not existing.digest_time_local:
+                    existing.digest_time_local = DEPS.settings.DIGEST_DEFAULT_TIME
+            else:
+                existing.digest_time_local = None
             s.flush()
             feed_id = existing.id
             already_exists = True
         else:
+            digest_time_local = None
+            if mode == "digest":
+                digest_time_local = digest_time or DEPS.settings.DIGEST_DEFAULT_TIME
             feed = Feed(
                 user_id=user_id,
                 url=url,
@@ -111,7 +120,7 @@ async def _create_feed_and_seed_reply(
                 label=label,
                 mode=mode,
                 poll_interval_min=interval,
-                digest_time_local=digest_time if mode == "digest" else None,
+                digest_time_local=digest_time_local,
                 enabled=True,
             )
             s.add(feed)
@@ -264,7 +273,7 @@ async def cmd_youtube(message: Message) -> None:
     mode = "immediate"
     label = None
     interval = DEPS.settings.DEFAULT_POLL_INTERVAL_MIN
-    digest_time = DEPS.settings.DIGEST_DEFAULT_TIME
+    digest_time = None
     for a in url_parts[1:]:
         aval = a.strip().lower()
         if aval in ("immediate", "digest", "on_demand"):
@@ -279,7 +288,7 @@ async def cmd_youtube(message: Message) -> None:
             except Exception:
                 pass
         elif a.startswith("time="):
-            digest_time = a.split("=", 1)[1]
+            digest_time = a.split("=", 1)[1] or None
     
     # Extract channel_id
     await message.answer("Определяю channel_id...")
@@ -326,7 +335,7 @@ async def cmd_channel(message: Message) -> None:
     mode = "immediate"
     label = None
     interval = DEPS.settings.DEFAULT_POLL_INTERVAL_MIN
-    digest_time = DEPS.settings.DIGEST_DEFAULT_TIME
+    digest_time = None
     for a in parts[2:]:
         aval = a.strip().lower()
         if aval in ("immediate", "digest", "on_demand"):
@@ -341,7 +350,7 @@ async def cmd_channel(message: Message) -> None:
             except Exception:
                 pass
         elif a.startswith("time="):
-            digest_time = a.split("=", 1)[1]
+            digest_time = a.split("=", 1)[1] or None
     url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
     await _create_feed_and_seed_reply(message, user_id, url, mode, label, interval, digest_time)
 
@@ -366,7 +375,7 @@ async def cmd_playlist(message: Message) -> None:
     mode = "immediate"
     label = None
     interval = DEPS.settings.DEFAULT_POLL_INTERVAL_MIN
-    digest_time = DEPS.settings.DIGEST_DEFAULT_TIME
+    digest_time = None
     for a in parts[2:]:
         aval = a.strip().lower()
         if aval in ("immediate", "digest", "on_demand"):
@@ -381,7 +390,7 @@ async def cmd_playlist(message: Message) -> None:
             except Exception:
                 pass
         elif a.startswith("time="):
-            digest_time = a.split("=", 1)[1]
+            digest_time = a.split("=", 1)[1] or None
     url = f"https://www.youtube.com/feeds/videos.xml?playlist_id={playlist_id}"
     await _create_feed_and_seed_reply(message, user_id, url, mode, label, interval, digest_time)
 
@@ -406,7 +415,7 @@ async def cmd_addfeed(message: Message) -> None:
     mode = "immediate"
     label = None
     interval = DEPS.settings.DEFAULT_POLL_INTERVAL_MIN
-    digest_time = DEPS.settings.DIGEST_DEFAULT_TIME
+    digest_time = None
     for a in parts[2:]:
         aval = a.strip().lower()
         if aval in ("immediate", "digest", "on_demand"):
@@ -421,7 +430,7 @@ async def cmd_addfeed(message: Message) -> None:
             except Exception:
                 pass
         elif a.startswith("time="):
-            digest_time = a.split("=", 1)[1]
+            digest_time = a.split("=", 1)[1] or None
     await _create_feed_and_seed_reply(message, user_id, url, mode, label, interval, digest_time)
 
 
@@ -495,7 +504,7 @@ async def cmd_setmode(message: Message) -> None:
     digest_time = None
     for p in parts[3:]:
         if p.startswith("time="):
-            digest_time = p.split("=", 1)[1]
+            digest_time = p.split("=", 1)[1] or None
     with session_scope() as s:
         feed = s.get(Feed, feed_id)
         if not feed or feed.user_id != user_id:
@@ -503,7 +512,10 @@ async def cmd_setmode(message: Message) -> None:
             return
         feed.mode = mode
         if mode == "digest":
-            feed.digest_time_local = digest_time or DEPS.settings.DIGEST_DEFAULT_TIME
+            if digest_time:
+                feed.digest_time_local = digest_time
+            elif not feed.digest_time_local:
+                feed.digest_time_local = DEPS.settings.DIGEST_DEFAULT_TIME
         else:
             feed.digest_time_local = None
         interval = feed.poll_interval_min

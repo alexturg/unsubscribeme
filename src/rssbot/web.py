@@ -267,7 +267,7 @@ async def add_feed(request: web.Request) -> web.Response:
     mode = (form.get("mode") or "immediate").strip()
     label = (form.get("label") or None) or None
     interval = form.get("interval") or str(DEPS.settings.DEFAULT_POLL_INTERVAL_MIN)
-    digest_time = (form.get("time") or None) or None
+    digest_time = (form.get("time") or "").strip() or None
     try:
         interval_i = max(1, int(interval))
     except Exception:
@@ -293,10 +293,19 @@ async def add_feed(request: web.Request) -> web.Response:
             existing.mode = mode
             existing.label = label
             existing.poll_interval_min = interval_i
-            existing.digest_time_local = digest_time if mode == "digest" else None
+            if mode == "digest":
+                if digest_time:
+                    existing.digest_time_local = digest_time
+                elif not existing.digest_time_local:
+                    existing.digest_time_local = DEPS.settings.DIGEST_DEFAULT_TIME
+            else:
+                existing.digest_time_local = None
             s.flush()
             feed_id = existing.id
         else:
+            digest_time_local = None
+            if mode == "digest":
+                digest_time_local = digest_time or DEPS.settings.DIGEST_DEFAULT_TIME
             feed = Feed(
                 user_id=user_id,
                 url=url,
@@ -304,7 +313,7 @@ async def add_feed(request: web.Request) -> web.Response:
                 label=label,
                 mode=mode,
                 poll_interval_min=interval_i,
-                digest_time_local=digest_time if mode == "digest" else None,
+                digest_time_local=digest_time_local,
                 enabled=True,
             )
             s.add(feed)
@@ -328,7 +337,7 @@ async def update_feed(request: web.Request) -> web.Response:
     mode = (form.get("mode") or "immediate").strip()
     label = (form.get("label") or None) or None
     enabled_str = (form.get("enabled") or "true").lower()
-    digest_time = (form.get("time") or None) or None
+    digest_time = (form.get("time") or "").strip() or None
     interval = form.get("interval") or "10"
     try:
         interval_i = max(1, int(interval))
@@ -347,7 +356,13 @@ async def update_feed(request: web.Request) -> web.Response:
         feed.label = label
         feed.poll_interval_min = interval_i
         feed.enabled = enabled_str == "true"
-        feed.digest_time_local = digest_time if mode == "digest" else None
+        if mode == "digest":
+            if digest_time:
+                feed.digest_time_local = digest_time
+            elif not feed.digest_time_local:
+                feed.digest_time_local = DEPS.settings.DIGEST_DEFAULT_TIME
+        else:
+            feed.digest_time_local = None
         enabled = feed.enabled
     if enabled:
         DEPS.scheduler.schedule_feed_poll(feed_id, interval_i)
