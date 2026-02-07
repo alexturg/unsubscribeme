@@ -16,7 +16,8 @@ Core commands:
 - `/start` — register.
 - `/ai <youtube_url_or_video_id> [дополнительный фокус]` — расшифровать и сделать AI-суммаризацию видео.
 - `/addfeed <url> [mode=immediate|digest|on_demand] [label=...] [interval=10] [time=HH:MM]`
-- `/addeventsource <url> [label=...] [interval=1]` — add JSON events source (start notifications)
+- `/addeventsource <url> [type=json|ics] [label=...] [interval=1]` — add events source (start notifications)
+- `/addics <url> [label=...] [interval=1]` — add ICS calendar events source (start notifications)
 - `/addevents [feed=<id>|<id>] [label=...] [interval=1]` + multiline rows in message — add events directly from Telegram text/CSV rows
 - `/channel <channel_id> [mode=...] [label=...] [interval=10] [time=HH:MM]`
 - `/playlist <playlist_id> [mode=...] [label=...] [interval=10] [time=HH:MM]`
@@ -49,6 +50,14 @@ Example:
   ]
 }
 ```
+
+ICS events source format:
+- Standard `.ics` calendar with `VEVENT`.
+- Event start time comes from `DTSTART` (`Z`, `TZID=...`, and `VALUE=DATE` are supported).
+- Event title comes from `SUMMARY`.
+- Event link uses `URL`, or first URL from `DESCRIPTION`, or falls back to the feed URL.
+- Recommended: stable `UID` for deduplication/upserts.
+- `webcal://` links are accepted and automatically normalized to `https://`.
 
 `/addevents` text format examples:
 ```text

@@ -65,9 +65,9 @@ class BotScheduler:
                 return
             feed_type = (feed.type or "").strip().lower()
 
-        if feed_type in {"event_json", "event_manual"}:
+        if feed_type in {"event_json", "event_ics", "event_manual"}:
             try:
-                if feed_type == "event_json":
+                if feed_type in {"event_json", "event_ics"}:
                     await fetch_and_store_event_source(feed_id)
                 await self._deliver_due_event_starts(feed_id)
             except Exception:
@@ -180,7 +180,7 @@ class BotScheduler:
             if not feed or not feed.enabled:
                 return 0
             feed_type = (feed.type or "").strip().lower()
-            if feed_type not in {"event_json", "event_manual"}:
+            if feed_type not in {"event_json", "event_ics", "event_manual"}:
                 return 0
             user = s.get(User, feed.user_id)
             if not user:
