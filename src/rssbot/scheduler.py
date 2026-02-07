@@ -12,7 +12,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .db import Delivery, Feed, Item, User, session_scope, FeedBaseline
 from .rules import Content, matches_rules
-from .rss import fetch_and_store_feed, compute_available_at
+from .rss import fetch_and_store_event_source, fetch_and_store_feed, compute_available_at
 from .config import Settings
 
 
@@ -59,6 +59,21 @@ class BotScheduler:
             pass
 
     async def _poll_feed_job(self, feed_id: int) -> None:
+        with session_scope() as s:
+            feed = s.get(Feed, feed_id)
+            if not feed or not feed.enabled:
+                return
+            feed_type = (feed.type or "").strip().lower()
+
+        if feed_type in {"event_json", "event_manual"}:
+            try:
+                if feed_type == "event_json":
+                    await fetch_and_store_event_source(feed_id)
+                await self._deliver_due_event_starts(feed_id)
+            except Exception:
+                return
+            return
+
         try:
             new_ids = await fetch_and_store_feed(feed_id)
         except Exception:
@@ -70,6 +85,17 @@ class BotScheduler:
         # handle deliveries for immediate mode
         for item_id in new_ids:
             await self._maybe_deliver_immediate(item_id)
+
+    async def _send_event_start_message(
+        self, chat_id: int, title: str, link: str
+    ) -> tuple[str, Optional[str]]:
+        text = f"Старт трансляции: {title}"
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть", url=link)]])
+        try:
+            await self.ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+            return "ok", None
+        except Exception as e:
+            return "fail", str(e)[:1000]
 
     async def _send_video_message(
         self, chat_id: int, title: str, link: str
@@ -143,6 +169,93 @@ class BotScheduler:
                     error_message=error,
                 )
             )
+
+    async def _deliver_due_event_starts(self, feed_id: int) -> int:
+        now_utc = datetime.now(timezone.utc)
+        with session_scope() as s:
+            feed = s.get(Feed, feed_id)
+            if not feed or not feed.enabled:
+                return 0
+            feed_type = (feed.type or "").strip().lower()
+            if feed_type not in {"event_json", "event_manual"}:
+                return 0
+            user = s.get(User, feed.user_id)
+            if not user:
+                return 0
+            due_item_ids = [
+                row[0]
+                for row in (
+                    s.query(Item.id)
+                    .filter(
+                        Item.feed_id == feed_id,
+                        Item.published_at.isnot(None),
+                        Item.published_at <= now_utc,
+                    )
+                    .order_by(Item.published_at.asc(), Item.id.asc())
+                    .all()
+                )
+            ]
+            user_id = user.id
+
+        sent = 0
+        for item_id in due_item_ids:
+            with session_scope() as s:
+                item = s.get(Item, item_id)
+                if not item:
+                    continue
+                feed = s.get(Feed, item.feed_id)
+                if not feed or not feed.enabled:
+                    continue
+                user = s.get(User, feed.user_id)
+                if not user or user.id != user_id:
+                    continue
+                if not item.published_at or item.published_at > datetime.now(timezone.utc):
+                    continue
+
+                delivered = (
+                    s.query(Delivery.id)
+                    .filter(
+                        Delivery.item_id == item.id,
+                        Delivery.feed_id == feed.id,
+                        Delivery.user_id == user.id,
+                        Delivery.channel == "immediate",
+                    )
+                    .first()
+                )
+                if delivered:
+                    continue
+
+                content = Content(
+                    title=item.title or "",
+                    description="",
+                    categories=item.categories,
+                    duration_sec=item.duration_sec,
+                )
+                if not matches_rules(content, feed.rules):
+                    continue
+
+                chat_id = user.chat_id
+                item_id_v = item.id
+                feed_id_v = feed.id
+                user_id_v = user.id
+                title = item.title or "(без названия)"
+                link = item.link or ""
+
+            status, error = await self._send_event_start_message(chat_id, title, link)
+            with session_scope() as s:
+                s.add(
+                    Delivery(
+                        item_id=item_id_v,
+                        feed_id=feed_id_v,
+                        user_id=user_id_v,
+                        channel="immediate",
+                        status=status,
+                        error_message=error,
+                    )
+                )
+            if status == "ok":
+                sent += 1
+        return sent
 
     async def _digest_scan_tick(self) -> None:
         # For each feed in digest mode, if it's time in user's tz and not sent today, send digest
