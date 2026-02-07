@@ -194,19 +194,33 @@ class BotScheduler:
             user = s.get(User, feed.user_id)
             if not user:
                 return 0
-            due_item_ids = [
-                row[0]
-                for row in (
-                    s.query(Item.id)
-                    .filter(
-                        Item.feed_id == feed_id,
-                        Item.published_at.isnot(None),
-                        Item.published_at <= now_utc,
+            baseline = s.get(FeedBaseline, feed.id)
+            # For remote event feeds (JSON/ICS), skip historical backlog on first run.
+            if feed_type in {"event_json", "event_ics"} and baseline is None:
+                s.add(
+                    FeedBaseline(
+                        feed_id=feed.id,
+                        baseline_published_at=now_utc,
                     )
-                    .order_by(Item.published_at.asc(), Item.id.asc())
-                    .all()
                 )
-            ]
+                return 0
+
+            baseline_published_at = _to_utc_aware(
+                baseline.baseline_published_at if baseline else None
+            )
+            due_query = (
+                s.query(Item.id)
+                .filter(
+                    Item.feed_id == feed_id,
+                    Item.published_at.isnot(None),
+                    Item.published_at <= now_utc,
+                )
+                .order_by(Item.published_at.asc(), Item.id.asc())
+            )
+            if baseline_published_at is not None:
+                due_query = due_query.filter(Item.published_at > baseline_published_at)
+
+            due_item_ids = [row[0] for row in due_query.all()]
             user_id = user.id
 
         sent = 0
