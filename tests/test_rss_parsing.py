@@ -1,8 +1,14 @@
 import asyncio
-from datetime import timezone
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from rssbot.db import init_engine, session_scope, User, Feed, Item
-from rssbot.rss import _extract_video_id, fetch_and_store_latest_item
+from rssbot.rss import (
+    _extract_video_id,
+    _normalized_event_rows,
+    fetch_and_store_event_source,
+    fetch_and_store_latest_item,
+)
 
 
 def test_extract_video_id_variants():
@@ -73,3 +79,77 @@ def test_fetch_and_store_latest_item(monkeypatch, tmp_path):
     with session_scope() as s:
         assert s.query(Item).count() == 1
 
+
+def test_normalized_event_rows_accepts_array_and_object():
+    tz = ZoneInfo("Europe/Moscow")
+    payload_obj = {
+        "events": [
+            {
+                "id": "evt-1",
+                "title": "Event One",
+                "link": "https://example.com/1",
+                "start_at": "2026-02-10T19:30:00+03:00",
+            }
+        ]
+    }
+    rows_obj = _normalized_event_rows(payload_obj, tz)
+    assert len(rows_obj) == 1
+    assert rows_obj[0]["external_id"] == "evt-1"
+    assert rows_obj[0]["title"] == "Event One"
+    assert rows_obj[0]["link"] == "https://example.com/1"
+    assert rows_obj[0]["published_at"] == datetime(2026, 2, 10, 16, 30, tzinfo=timezone.utc)
+
+    payload_arr = [
+        {
+            "title": "Event Two",
+            "url": "https://example.com/2",
+            "start_at": "2026-02-11T20:00:00+03:00",
+        }
+    ]
+    rows_arr = _normalized_event_rows(payload_arr, tz)
+    assert len(rows_arr) == 1
+    assert rows_arr[0]["title"] == "Event Two"
+    assert rows_arr[0]["link"] == "https://example.com/2"
+    assert rows_arr[0]["external_id"]
+
+
+def test_fetch_and_store_event_source(monkeypatch, tmp_path):
+    db_path = tmp_path / "bot.sqlite"
+    init_engine(db_path)
+
+    with session_scope() as s:
+        user = User(chat_id=777, tz="UTC")
+        s.add(user)
+        s.flush()
+        feed = Feed(
+            user_id=user.id,
+            url="https://example/events.json",
+            type="event_json",
+            enabled=True,
+            mode="immediate",
+            poll_interval_min=1,
+        )
+        s.add(feed)
+        s.flush()
+        feed_id = feed.id
+
+    payload = (
+        '{"events":[{"id":"evt-1","title":"Event One","link":"https://example.com/1",'
+        '"start_at":"2026-02-10T19:30:00+03:00"}]}'
+    ).encode("utf-8")
+
+    async def fake_fetch_http(feed):
+        return 200, "etag-e", "Wed, 10 Feb 2026 16:00:00 GMT", payload
+
+    from rssbot import rss as rss_mod
+
+    monkeypatch.setattr(rss_mod, "fetch_feed_http", fake_fetch_http)
+
+    created_ids = asyncio.run(fetch_and_store_event_source(feed_id))
+    assert len(created_ids) == 1
+
+    with session_scope() as s:
+        items = s.query(Item).filter(Item.feed_id == feed_id).all()
+        assert len(items) == 1
+        assert items[0].external_id == "evt-1"
+        assert items[0].published_at == datetime(2026, 2, 10, 16, 30)

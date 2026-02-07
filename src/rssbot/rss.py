@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import calendar
+import json
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 import re
 
@@ -64,6 +65,78 @@ def _summary_hash(entry: feedparser.FeedParserDict) -> Optional[str]:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
+def _parse_event_datetime(value: Any, default_tz: ZoneInfo) -> Optional[datetime]:
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except Exception:
+            return None
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+
+    # Support common ISO forms, including a trailing Z.
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=default_tz)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        pass
+
+    # Support "DD.MM.YYYY HH:MM" as a practical fallback.
+    m = re.match(
+        r"^\s*(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):(\d{2})\s*$",
+        raw,
+    )
+    if not m:
+        return None
+    day, month, year, hour, minute = [int(x) for x in m.groups()]
+    try:
+        dt_local = datetime(year, month, day, hour, minute, tzinfo=default_tz)
+        return dt_local.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _normalized_event_rows(payload: Any, default_tz: ZoneInfo) -> List[dict[str, Any]]:
+    rows: list[Any]
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict) and isinstance(payload.get("events"), list):
+        rows = payload["events"]
+    else:
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get("title") or raw.get("name") or "").strip()
+        link = str(raw.get("link") or raw.get("url") or "").strip()
+        start_raw = raw.get("start_at", raw.get("starts_at", raw.get("start", raw.get("time"))))
+        start_at = _parse_event_datetime(start_raw, default_tz)
+        if not title or not link or not start_at:
+            continue
+        external_id = str(raw.get("id") or raw.get("external_id") or "").strip()
+        if not external_id:
+            # Fallback id if the parser doesn't provide one.
+            # Strongly recommended: send stable `id` in payload.
+            seed = f"{title}\n{link}\n{start_at.isoformat()}"
+            external_id = hashlib.sha1(seed.encode("utf-8")).hexdigest()
+        normalized.append(
+            {
+                "external_id": external_id,
+                "title": title,
+                "link": link,
+                "published_at": start_at,
+            }
+        )
+    return normalized
+
+
 async def fetch_feed_http(feed: Feed) -> Tuple[int, Optional[str], Optional[str], Optional[bytes]]:
     headers = {}
     if feed.http_etag:
@@ -78,6 +151,74 @@ async def fetch_feed_http(feed: Feed) -> Tuple[int, Optional[str], Optional[str]
                 return 304, resp.headers.get("ETag"), resp.headers.get("Last-Modified"), None
             content = await resp.read()
             return resp.status, resp.headers.get("ETag"), resp.headers.get("Last-Modified"), content
+
+
+async def fetch_and_store_event_source(feed_id: int) -> List[int]:
+    """Fetch JSON events source and upsert into items.
+
+    Expected payload format:
+      {"events":[{"id":"...", "title":"...", "link":"...", "start_at":"ISO-8601"}]}
+    or
+      [{"id":"...", "title":"...", "link":"...", "start_at":"ISO-8601"}]
+    """
+    with session_scope() as s:
+        feed = s.get(Feed, feed_id)
+        if not feed or not feed.enabled:
+            return []
+
+    status, etag, last_modified, content = await fetch_feed_http(feed)
+    with session_scope() as s:
+        f = s.get(Feed, feed_id)
+        f.http_etag = etag or f.http_etag
+        f.http_last_modified = last_modified or f.http_last_modified
+        f.last_poll_at = datetime.now(timezone.utc)
+    if status == 304 or not content:
+        return []
+    if status != 200:
+        return []
+
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except Exception:
+        return []
+
+    settings = Settings()
+    default_tz = ZoneInfo(settings.TZ or "UTC")
+    events = _normalized_event_rows(payload, default_tz)
+    if not events:
+        return []
+
+    created_ids: list[int] = []
+    with session_scope() as s:
+        f = s.get(Feed, feed_id)
+        for event in events:
+            existing = (
+                s.query(Item)
+                .filter(Item.feed_id == f.id, Item.external_id == event["external_id"])
+                .first()
+            )
+            if existing:
+                existing.title = event["title"]
+                existing.link = event["link"]
+                existing.published_at = event["published_at"]
+                continue
+            it = Item(
+                feed_id=f.id,
+                external_id=event["external_id"],
+                title=event["title"],
+                link=event["link"],
+                published_at=event["published_at"],
+                categories=["event_start"],
+                summary_hash=hashlib.sha1(
+                    f"{event['title']}\n{event['link']}\n{event['published_at'].isoformat()}".encode(
+                        "utf-8"
+                    )
+                ).hexdigest(),
+            )
+            s.add(it)
+            s.flush()
+            created_ids.append(it.id)
+    return created_ids
 
 
 async def fetch_and_store_feed(feed_id: int) -> List[int]:
