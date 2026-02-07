@@ -98,9 +98,11 @@ class BotScheduler:
             return "fail", str(e)[:1000]
 
     async def _send_video_message(
-        self, chat_id: int, title: str, link: str
+        self, chat_id: int, title: str, link: str, feed_name: Optional[str] = None
     ) -> tuple[str, Optional[str]]:
-        text = f"Новый ролик: {title}"
+        normalized_feed_name = (feed_name or "").strip()
+        feed_name_text = normalized_feed_name or "без названия ленты"
+        text = f"Новый ролик: {title} [{feed_name_text}]"
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть", url=link)]])
         try:
             await self.ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
@@ -154,9 +156,10 @@ class BotScheduler:
             feed_id_v = feed.id
             title = item.title or "(без названия)"
             link = item.link or ""
+            feed_name = (feed.label or feed.name or "").strip()
 
         # Send message outside of transaction
-        status, error = await self._send_video_message(chat_id, title, link)
+        status, error = await self._send_video_message(chat_id, title, link, feed_name)
 
         with session_scope() as s:
             s.add(
@@ -351,6 +354,7 @@ class BotScheduler:
 
             chat_id = user.chat_id
             feed_id_v = feed.id
+            feed_name = (feed.label or feed.name or "").strip()
 
         if not kept_info:
             if update_last_digest_at:
@@ -363,7 +367,9 @@ class BotScheduler:
         kept_info = kept_info[:20]
         send_results = []
         for info in kept_info:
-            status, error = await self._send_video_message(chat_id, info["title"], info["link"])
+            status, error = await self._send_video_message(
+                chat_id, info["title"], info["link"], feed_name
+            )
             send_results.append(
                 {
                     "id": info["id"],
@@ -429,10 +435,11 @@ class BotScheduler:
             user_id_v = user.id
             feed_id_v = feed.id
             title = item.title or "(без названия)"
+            feed_name = (feed.label or feed.name or "").strip()
         link = item.link or ""
         is_digest_mode = feed.mode == "digest"
 
-        status, error = await self._send_video_message(chat_id, title, link)
+        status, error = await self._send_video_message(chat_id, title, link, feed_name)
 
         now = datetime.now(timezone.utc)
         with session_scope() as s:
