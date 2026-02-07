@@ -17,6 +17,12 @@ from .config import Settings
 from .db import Delivery, Feed, FeedBaseline, FeedRule, Item, Session, User, session_scope
 from .scheduler import BotScheduler
 from .rss import fetch_and_store_event_source, fetch_and_store_latest_item
+from .ai_summarizer import (
+    AiSummarizerError,
+    parse_ai_request_text,
+    split_message_chunks,
+    summarize_video,
+)
 from utils.yt_channel_id import get_channel_id
 
 
@@ -72,7 +78,8 @@ async def cmd_start(message: Message) -> None:
     await message.answer(
         "Привет! Настраивать ленты теперь удобнее в веб-интерфейсе.\n"
         f"Открой: {web_link}\n\n"
-        "Команды: /addfeed, /addeventsource, /addevents, /youtube, /channel, /playlist, /list, /remove, /setmode, /setfilter, /digest, /mute, /unmute"
+        "Команды: /ai, /addfeed, /addeventsource, /addevents, /youtube, /channel, /playlist, "
+        "/list, /remove, /setmode, /setfilter, /digest, /mute, /unmute"
     )
 
 
@@ -376,6 +383,59 @@ async def _extract_youtube_channel_id(url: str) -> Optional[str]:
             exc_info=True,
         )
         return None
+
+
+@router.message(Command("ai"))
+async def cmd_ai(message: Message) -> None:
+    """Суммаризировать YouTube-видео через внутренний AI-инструмент.
+
+    Формат: /ai <youtube_url_or_video_id> [что именно вас интересует]
+    """
+    user_id = _ensure_user_id(message)
+    if not user_id:
+        await message.answer("Доступ запрещен.")
+        return
+
+    try:
+        request = parse_ai_request_text(message.text or "")
+    except ValueError:
+        await message.answer(
+            "Использование: /ai <youtube_url_or_video_id> [дополнительный фокус]\n"
+            "Пример: /ai https://www.youtube.com/watch?v=dQw4w9WgXcQ "
+            "Выдели только практические выводы и риски.",
+            parse_mode=None,
+        )
+        return
+
+    await message.answer(
+        "Запускаю суммаризацию видео. Это может занять 20-90 секунд.",
+        parse_mode=None,
+    )
+
+    try:
+        result = await summarize_video(
+            DEPS.settings,
+            chat_id=message.chat.id,
+            video_url=request.video_url,
+            custom_prompt=request.custom_prompt,
+        )
+    except AiSummarizerError as exc:
+        await message.answer(f"Не удалось сделать суммаризацию: {str(exc)}", parse_mode=None)
+        return
+    except Exception as exc:
+        logging.error("Unexpected /ai failure for chat_id=%s: %s", message.chat.id, exc, exc_info=True)
+        await message.answer("Внутренняя ошибка при суммаризации.", parse_mode=None)
+        return
+
+    focus_text = ""
+    if request.custom_prompt:
+        focus_text = f"\nФокус: {request.custom_prompt}"
+
+    response_text = (
+        f"Суммаризация готова.\nВидео: {request.video_url}{focus_text}\n\n{result.summary_text}"
+    )
+    for chunk in split_message_chunks(response_text):
+        await message.answer(chunk, parse_mode=None)
 
 
 @router.message(Command("youtube"))
