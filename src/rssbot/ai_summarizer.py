@@ -85,6 +85,17 @@ def _parse_languages(value: str) -> list[str]:
     return [item.strip() for item in (value or "").split(",") if item.strip()]
 
 
+def _infer_instruction_language(custom_prompt: Optional[str]) -> Optional[str]:
+    text = (custom_prompt or "").strip().lower()
+    if not text:
+        return None
+    cyr = sum(1 for ch in text if ("а" <= ch <= "я") or ch == "ё")
+    lat = sum(1 for ch in text if "a" <= ch <= "z")
+    if cyr == 0 and lat == 0:
+        return None
+    return "Russian" if cyr >= lat else "English"
+
+
 def _format_timestamp(seconds: float) -> str:
     total_seconds = max(0, int(seconds))
     hours = total_seconds // 3600
@@ -109,6 +120,7 @@ def _summarize_sync(
 
     max_sentences = max(1, int(settings.AI_SUMMARIZER_MAX_SENTENCES))
     max_input_words = max(0, int(settings.AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS))
+    target_language = _infer_instruction_language(custom_prompt)
 
     video_id = extract_video_id(video_url)
     segments = fetch_transcript(video_id=video_id, languages=languages)
@@ -122,6 +134,7 @@ def _summarize_sync(
             custom_prompt=custom_prompt,
             max_input_words=max_input_words or None,
             api_key=getattr(settings, "OPENAI_API_KEY", None),
+            target_language=target_language,
         )
     else:
         summary = summarize_text(plain_transcript, max_sentences=max_sentences)

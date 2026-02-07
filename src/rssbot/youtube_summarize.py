@@ -9,6 +9,7 @@ SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 WORD_RE = re.compile(r"\b[^\W\d_][^\W\d_'-]*\b", flags=re.UNICODE)
 WHITESPACE_RE = re.compile(r"\s+")
 CLAUSE_SPLIT_RE = re.compile(r"(?<=[,;:])\s+")
+INLINE_BULLET_RE = re.compile(r"(?:(?<=^)|(?<=\s))[•\-\*]\s+")
 
 BASE_STOPWORDS = {
     "a",
@@ -578,6 +579,67 @@ def _adaptive_llm_output_tokens(max_sentences: int, custom_prompt: str | None) -
     return max(220, min(1100, budget))
 
 
+def _split_inline_bullets(text: str) -> list[str]:
+    normalized = _normalize_space(text)
+    if not normalized:
+        return []
+
+    matches = list(INLINE_BULLET_RE.finditer(normalized))
+    if not matches:
+        return []
+
+    items: list[str] = []
+    for idx, match in enumerate(matches):
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(normalized)
+        candidate = normalized[start:end].strip()
+        if candidate:
+            items.append(candidate)
+    return items
+
+
+def _format_llm_summary_output(raw_output: str, max_sentences: int) -> str:
+    text = (raw_output or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+
+    # Preserve line breaks when present; split inline bullets if the model returned them in one line.
+    candidates: list[str] = []
+    for line in text.split("\n"):
+        line_clean = _normalize_space(line)
+        if not line_clean:
+            continue
+        inline = _split_inline_bullets(line_clean)
+        if inline:
+            candidates.extend(inline)
+        else:
+            if line_clean.startswith(("- ", "* ", "• ")):
+                candidates.append(line_clean[2:].strip())
+            else:
+                candidates.append(line_clean)
+
+    if not candidates:
+        return ""
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        normalized = _normalize_space(item).strip(" -•*")
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(normalized)
+        if len(deduped) >= max_sentences:
+            break
+
+    if not deduped:
+        return ""
+    return "\n".join(f"- {item}" for item in deduped)
+
+
 def summarize_text_with_openai(
     text: str,
     max_sentences: int = 7,
@@ -585,6 +647,7 @@ def summarize_text_with_openai(
     custom_prompt: str | None = None,
     max_input_words: int | None = None,
     api_key: str | None = None,
+    target_language: str | None = None,
 ) -> str:
     if max_sentences < 1:
         raise ValueError("max_sentences must be >= 1")
@@ -624,6 +687,11 @@ def summarize_text_with_openai(
             "Additional user instructions for this summary:\n"
             f"{custom_prompt.strip()}"
         )
+    if target_language:
+        user_prompt = (
+            f"{user_prompt}\n\n"
+            f"Output language: {target_language}. Use only this language in the final summary."
+        )
 
     try:
         client = OpenAI(api_key=api_key) if api_key else OpenAI()
@@ -643,13 +711,7 @@ def summarize_text_with_openai(
         raise SummarizationError(f"OpenAI summarization failed: {message}") from exc
 
     output = getattr(response, "output_text", None)
-    summary = _normalize_space(output if isinstance(output, str) else "")
+    summary = _format_llm_summary_output(output if isinstance(output, str) else "", max_sentences)
     if not summary:
         raise SummarizationError("OpenAI returned an empty summary.")
-
-    if "- " not in summary:
-        lines = [line.strip(" -") for line in summary.splitlines() if line.strip()]
-        lines = lines[:max_sentences]
-        return "\n".join(f"- {line}" for line in lines)
-
-    return "\n".join(line.rstrip() for line in summary.splitlines() if line.strip())
+    return summary
