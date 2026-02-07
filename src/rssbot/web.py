@@ -40,6 +40,13 @@ def _ensure_user_by_chat_id(chat_id: int) -> int:
         return user.id
 
 
+def _normalize_ics_url(url: str) -> str:
+    value = (url or "").strip()
+    if value.lower().startswith("webcal://"):
+        return "https://" + value[len("webcal://") :]
+    return value
+
+
 def _html_page(title: str, body: str) -> web.Response:
     html = f"""
     <!doctype html>
@@ -127,6 +134,7 @@ async def user_page(request: web.Request) -> web.Response:
             <option value="channel">YouTube channel_id</option>
             <option value="playlist">YouTube playlist_id</option>
             <option value="url">URL RSS</option>
+            <option value="ics">ICS calendar URL</option>
           </select>
         </div>
         <div><label>Значение</label><input type="text" name="value" required placeholder="UC... или PL... или https://..."></div>
@@ -276,10 +284,16 @@ async def add_feed(request: web.Request) -> web.Response:
     if not value:
         raise web.HTTPBadRequest(text="value is required")
 
+    feed_type = "youtube"
     if kind == "channel":
         url = f"https://www.youtube.com/feeds/videos.xml?channel_id={value}"
     elif kind == "playlist":
         url = f"https://www.youtube.com/feeds/videos.xml?playlist_id={value}"
+    elif kind == "ics":
+        url = _normalize_ics_url(value)
+        feed_type = "event_ics"
+        mode = "immediate"
+        digest_time = None
     else:
         url = value
 
@@ -291,6 +305,7 @@ async def add_feed(request: web.Request) -> web.Response:
         if existing:
             existing.enabled = True
             existing.mode = mode
+            existing.type = feed_type
             existing.label = label
             existing.poll_interval_min = interval_i
             if mode == "digest":
@@ -309,7 +324,7 @@ async def add_feed(request: web.Request) -> web.Response:
             feed = Feed(
                 user_id=user_id,
                 url=url,
-                type="youtube",
+                type=feed_type,
                 label=label,
                 mode=mode,
                 poll_interval_min=interval_i,

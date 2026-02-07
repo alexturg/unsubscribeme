@@ -43,6 +43,13 @@ def set_deps(settings: Settings, scheduler: BotScheduler) -> None:
     DEPS = BotDeps(settings=settings, scheduler=scheduler)
 
 
+def _normalize_ics_url(url: str) -> str:
+    value = (url or "").strip()
+    if value.lower().startswith("webcal://"):
+        return "https://" + value[len("webcal://") :]
+    return value
+
+
 def _is_allowed(chat_id: int) -> bool:
     assert DEPS is not None
     allowed = DEPS.settings.allowed_chat_ids()
@@ -78,7 +85,7 @@ async def cmd_start(message: Message) -> None:
     await message.answer(
         "Привет! Настраивать ленты теперь удобнее в веб-интерфейсе.\n"
         f"Открой: {web_link}\n\n"
-        "Команды: /ai, /addfeed, /addeventsource, /addevents, /youtube, /channel, /playlist, "
+        "Команды: /ai, /addfeed, /addeventsource, /addics, /addevents, /youtube, /channel, /playlist, "
         "/list, /remove, /setmode, /setfilter, /digest, /mute, /unmute"
     )
 
@@ -183,7 +190,11 @@ async def _create_event_source_feed_reply(
     url: str,
     label: Optional[str],
     interval: int,
+    source_type: str = "event_json",
 ) -> None:
+    normalized_type = source_type.strip().lower()
+    if normalized_type not in {"event_json", "event_ics"}:
+        normalized_type = "event_json"
     removed = _dedupe_user_feeds(user_id)
 
     with session_scope() as s:
@@ -196,7 +207,7 @@ async def _create_event_source_feed_reply(
         if existing:
             existing.enabled = True
             existing.mode = "immediate"
-            existing.type = "event_json"
+            existing.type = normalized_type
             existing.label = label
             existing.poll_interval_min = interval
             existing.digest_time_local = None
@@ -207,7 +218,7 @@ async def _create_event_source_feed_reply(
             feed = Feed(
                 user_id=user_id,
                 url=url,
-                type="event_json",
+                type=normalized_type,
                 label=label,
                 mode="immediate",
                 poll_interval_min=interval,
@@ -231,7 +242,7 @@ async def _create_event_source_feed_reply(
         error = str(e)[:160]
 
     msg = (
-        f"Источник {'уже существовал' if already_exists else 'добавлен'} (id={feed_id}), тип: event_json."
+        f"Источник {'уже существовал' if already_exists else 'добавлен'} (id={feed_id}), тип: {normalized_type}."
         f" Загружено новых событий: {loaded}. Отправлено старт-уведомлений: {delivered}."
     )
     if removed:
@@ -639,11 +650,11 @@ async def cmd_addfeed(message: Message) -> None:
 
 @router.message(Command("addeventsource"))
 async def cmd_addeventsource(message: Message) -> None:
-    """Добавить JSON-источник событий.
+    """Добавить источник событий (JSON или ICS).
 
-    Формат: /addeventsource <url> [label=...] [interval=1]
+    Формат: /addeventsource <url> [type=json|ics] [label=...] [interval=1]
 
-    Ожидаемый формат JSON:
+    Ожидаемый формат для type=json:
     {"events":[{"id":"...", "title":"...", "link":"...", "start_at":"2026-02-08T19:30:00+03:00"}]}
     """
     user_id = _ensure_user_id(message)
@@ -653,10 +664,49 @@ async def cmd_addeventsource(message: Message) -> None:
     parts = (message.text or "").split()
     if len(parts) < 2:
         await message.answer(
-            "Использование: /addeventsource <url> [label=...] [interval=1]\n"
-            "JSON должен быть массивом событий или объектом с полем events.\n"
-            "Каждое событие: id (рекомендуется), title, link/url, start_at."
+            "Использование: /addeventsource <url> [type=json|ics] [label=...] [interval=1]\n"
+            "Для JSON: массив событий или объект с полем events.\n"
+            "Каждое событие: id (рекомендуется), title, link/url, start_at.\n"
+            "Для ICS: стандартный .ics с VEVENT."
         )
+        return
+    url = parts[1]
+    label = None
+    interval = 1
+    source_type = "event_ics" if url.lower().split("?", 1)[0].endswith(".ics") else "event_json"
+    for a in parts[2:]:
+        aval = a.strip().lower()
+        if aval in {"json", "ics"}:
+            source_type = "event_ics" if aval == "ics" else "event_json"
+        elif a.startswith("type="):
+            tv = a.split("=", 1)[1].strip().lower()
+            if tv in {"json", "ics"}:
+                source_type = "event_ics" if tv == "ics" else "event_json"
+        elif a.startswith("label="):
+            label = a.split("=", 1)[1]
+        elif a.startswith("interval="):
+            try:
+                interval = max(1, int(a.split("=", 1)[1]))
+            except Exception:
+                pass
+    if source_type == "event_ics":
+        url = _normalize_ics_url(url)
+    await _create_event_source_feed_reply(message, user_id, url, label, interval, source_type=source_type)
+
+
+@router.message(Command("addics"))
+async def cmd_addics(message: Message) -> None:
+    """Добавить источник событий в формате ICS.
+
+    Формат: /addics <url> [label=...] [interval=1]
+    """
+    user_id = _ensure_user_id(message)
+    if not user_id:
+        await message.answer("Доступ запрещен.")
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Использование: /addics <url> [label=...] [interval=1]")
         return
     url = parts[1]
     label = None
@@ -669,7 +719,8 @@ async def cmd_addeventsource(message: Message) -> None:
                 interval = max(1, int(a.split("=", 1)[1]))
             except Exception:
                 pass
-    await _create_event_source_feed_reply(message, user_id, url, label, interval)
+    url = _normalize_ics_url(url)
+    await _create_event_source_feed_reply(message, user_id, url, label, interval, source_type="event_ics")
 
 
 @router.message(Command("addevents"))
@@ -732,7 +783,7 @@ async def cmd_addevents(message: Message) -> None:
             if not feed or feed.user_id != user_id:
                 await message.answer("Лента не найдена.")
                 return
-            if (feed.type or "").strip().lower() not in ("event_json", "event_manual"):
+            if (feed.type or "").strip().lower() not in ("event_json", "event_ics", "event_manual"):
                 await message.answer(
                     "Эта лента не подходит для событий. Укажите event-ленту или не указывайте feed, "
                     "тогда будет создана новая."
@@ -803,7 +854,7 @@ async def cmd_addevents(message: Message) -> None:
             s.add(it)
             created += 1
         # Make sure this feed is treated as manual events if newly adapted.
-        if (feed.type or "").strip().lower() != "event_json":
+        if (feed.type or "").strip().lower() not in {"event_json", "event_ics"}:
             feed.type = "event_manual"
 
     DEPS.scheduler.schedule_feed_poll(feed_id, poll_interval)
@@ -828,7 +879,9 @@ async def cmd_list(message: Message) -> None:
     with session_scope() as s:
         feeds = s.query(Feed).filter(Feed.user_id == user_id).order_by(Feed.id.asc()).all()
         if not feeds:
-            await message.answer("У вас нет лент. Используйте /addfeed, /channel или /playlist для добавления.")
+            await message.answer(
+                "У вас нет лент. Используйте /addfeed, /channel, /playlist, /addeventsource или /addics."
+            )
             return
         lines = ["Ваши ленты:"]
         for f in feeds:

@@ -6,6 +6,7 @@ from rssbot.db import init_engine, session_scope, User, Feed, Item
 from rssbot.rss import (
     _extract_video_id,
     _normalized_event_rows,
+    _normalized_ics_event_rows,
     fetch_and_store_event_source,
     fetch_and_store_latest_item,
 )
@@ -113,6 +114,38 @@ def test_normalized_event_rows_accepts_array_and_object():
     assert rows_arr[0]["external_id"]
 
 
+def test_normalized_ics_event_rows_supports_url_description_and_tzid():
+    tz = ZoneInfo("UTC")
+    ics_payload = (
+        "BEGIN:VCALENDAR\r\n"
+        "VERSION:2.0\r\n"
+        "BEGIN:VEVENT\r\n"
+        "UID:event-1@example.com\r\n"
+        "DTSTART:20260210T163000Z\r\n"
+        "SUMMARY:Event One\r\n"
+        "URL:https://example.com/one\r\n"
+        "END:VEVENT\r\n"
+        "BEGIN:VEVENT\r\n"
+        "UID:event-2@example.com\r\n"
+        "DTSTART;TZID=Europe/Moscow:20260210T193000\r\n"
+        "SUMMARY:Event Two\r\n"
+        "DESCRIPTION:Join here https://example.com/two\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    ).encode("utf-8")
+
+    rows = _normalized_ics_event_rows(ics_payload, tz, fallback_link="https://example.com/fallback")
+    assert len(rows) == 2
+    assert rows[0]["external_id"] == "event-1@example.com"
+    assert rows[0]["title"] == "Event One"
+    assert rows[0]["link"] == "https://example.com/one"
+    assert rows[0]["published_at"] == datetime(2026, 2, 10, 16, 30, tzinfo=timezone.utc)
+    assert rows[1]["external_id"] == "event-2@example.com"
+    assert rows[1]["title"] == "Event Two"
+    assert rows[1]["link"] == "https://example.com/two"
+    assert rows[1]["published_at"] == datetime(2026, 2, 10, 16, 30, tzinfo=timezone.utc)
+
+
 def test_fetch_and_store_event_source(monkeypatch, tmp_path):
     db_path = tmp_path / "bot.sqlite"
     init_engine(db_path)
@@ -152,4 +185,55 @@ def test_fetch_and_store_event_source(monkeypatch, tmp_path):
         items = s.query(Item).filter(Item.feed_id == feed_id).all()
         assert len(items) == 1
         assert items[0].external_id == "evt-1"
+        assert items[0].published_at == datetime(2026, 2, 10, 16, 30)
+
+
+def test_fetch_and_store_event_source_ics(monkeypatch, tmp_path):
+    db_path = tmp_path / "bot.sqlite"
+    init_engine(db_path)
+
+    with session_scope() as s:
+        user = User(chat_id=888, tz="UTC")
+        s.add(user)
+        s.flush()
+        feed = Feed(
+            user_id=user.id,
+            url="https://example/events.ics",
+            type="event_ics",
+            enabled=True,
+            mode="immediate",
+            poll_interval_min=1,
+        )
+        s.add(feed)
+        s.flush()
+        feed_id = feed.id
+
+    payload = (
+        "BEGIN:VCALENDAR\r\n"
+        "VERSION:2.0\r\n"
+        "BEGIN:VEVENT\r\n"
+        "UID:ics-evt-1\r\n"
+        "DTSTART:20260210T163000Z\r\n"
+        "SUMMARY:ICS Event One\r\n"
+        "URL:https://example.com/ics/1\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    ).encode("utf-8")
+
+    async def fake_fetch_http(feed):
+        return 200, "etag-ics", "Wed, 10 Feb 2026 16:00:00 GMT", payload
+
+    from rssbot import rss as rss_mod
+
+    monkeypatch.setattr(rss_mod, "fetch_feed_http", fake_fetch_http)
+
+    created_ids = asyncio.run(fetch_and_store_event_source(feed_id))
+    assert len(created_ids) == 1
+
+    with session_scope() as s:
+        items = s.query(Item).filter(Item.feed_id == feed_id).all()
+        assert len(items) == 1
+        assert items[0].external_id == "ics-evt-1"
+        assert items[0].title == "ICS Event One"
+        assert items[0].link == "https://example.com/ics/1"
         assert items[0].published_at == datetime(2026, 2, 10, 16, 30)

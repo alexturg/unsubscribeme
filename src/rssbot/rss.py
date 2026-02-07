@@ -137,6 +137,165 @@ def _normalized_event_rows(payload: Any, default_tz: ZoneInfo) -> List[dict[str,
     return normalized
 
 
+def _unfold_ics_lines(text: str) -> list[str]:
+    """Join folded iCalendar lines (RFC 5545)."""
+    unfolded: list[str] = []
+    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if (raw.startswith(" ") or raw.startswith("\t")) and unfolded:
+            unfolded[-1] += raw[1:]
+        else:
+            unfolded.append(raw)
+    return unfolded
+
+
+def _ics_parse_key_params_and_value(line: str) -> tuple[str, dict[str, str], str]:
+    if ":" not in line:
+        return "", {}, ""
+    head, value = line.split(":", 1)
+    chunks = head.split(";")
+    key = chunks[0].strip().upper()
+    params: dict[str, str] = {}
+    for chunk in chunks[1:]:
+        if "=" not in chunk:
+            continue
+        p_key, p_val = chunk.split("=", 1)
+        params[p_key.strip().upper()] = p_val.strip()
+    return key, params, value.strip()
+
+
+def _ics_unescape_text(value: str) -> str:
+    return (
+        value.replace("\\N", "\n")
+        .replace("\\n", "\n")
+        .replace("\\,", ",")
+        .replace("\\;", ";")
+        .replace("\\\\", "\\")
+        .strip()
+    )
+
+
+def _extract_first_url(text: str) -> Optional[str]:
+    m = re.search(r"https?://[^\s<>()]+", text or "")
+    if not m:
+        return None
+    return m.group(0).rstrip(".,);")
+
+
+def _parse_ics_datetime(value: str, params: dict[str, str], default_tz: ZoneInfo) -> Optional[datetime]:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+
+    tz: ZoneInfo = default_tz
+    tzid = (params.get("TZID") or "").strip()
+    if tzid:
+        try:
+            tz = ZoneInfo(tzid)
+        except Exception:
+            tz = default_tz
+
+    # UTC format, e.g. 20260210T163000Z
+    if raw.endswith("Z"):
+        for fmt in ("%Y%m%dT%H%M%SZ", "%Y%m%dT%H%MZ"):
+            try:
+                dt = datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc)
+            except Exception:
+                continue
+
+    value_kind = (params.get("VALUE") or "").strip().upper()
+    if value_kind == "DATE" or ("T" not in raw and len(raw) == 8):
+        try:
+            dt_local = datetime.strptime(raw, "%Y%m%d").replace(tzinfo=tz)
+            return dt_local.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    for fmt in ("%Y%m%dT%H%M%S", "%Y%m%dT%H%M"):
+        try:
+            dt_local = datetime.strptime(raw, fmt).replace(tzinfo=tz)
+            return dt_local.astimezone(timezone.utc)
+        except Exception:
+            continue
+    return None
+
+
+def _normalized_ics_event_rows(
+    content: bytes,
+    default_tz: ZoneInfo,
+    fallback_link: Optional[str] = None,
+) -> List[dict[str, Any]]:
+    text = content.decode("utf-8-sig", errors="replace")
+    lines = _unfold_ics_lines(text)
+
+    normalized: list[dict[str, Any]] = []
+    event: Optional[dict[str, Any]] = None
+    for line in lines:
+        upper = line.strip().upper()
+        if upper == "BEGIN:VEVENT":
+            event = {}
+            continue
+        if upper == "END:VEVENT":
+            if not event:
+                continue
+            title = str(event.get("summary") or "").strip()
+            start_at = event.get("start_at")
+            if not isinstance(start_at, datetime):
+                continue
+            if not title:
+                title = "Событие"
+            link = str(event.get("url") or "").strip()
+            if not link:
+                description = str(event.get("description") or "")
+                link = _extract_first_url(description) or ""
+            if not link:
+                link = (fallback_link or "").strip()
+            if not link:
+                continue
+
+            uid = str(event.get("uid") or "").strip()
+            recurrence_id = str(event.get("recurrence_id") or "").strip()
+            external_id = uid
+            if uid and recurrence_id:
+                external_id = f"{uid}::{recurrence_id}"
+            if not external_id:
+                seed = f"{title}\n{link}\n{start_at.isoformat()}"
+                external_id = hashlib.sha1(seed.encode("utf-8")).hexdigest()
+
+            normalized.append(
+                {
+                    "external_id": external_id,
+                    "title": title,
+                    "link": link,
+                    "published_at": start_at,
+                }
+            )
+            event = None
+            continue
+        if event is None or ":" not in line:
+            continue
+
+        key, params, value = _ics_parse_key_params_and_value(line)
+        if not key:
+            continue
+        if key == "UID":
+            event["uid"] = _ics_unescape_text(value)
+        elif key == "SUMMARY":
+            event["summary"] = _ics_unescape_text(value)
+        elif key == "DESCRIPTION":
+            event["description"] = _ics_unescape_text(value)
+        elif key == "URL":
+            event["url"] = _ics_unescape_text(value)
+        elif key == "DTSTART":
+            parsed = _parse_ics_datetime(value, params, default_tz)
+            if parsed:
+                event["start_at"] = parsed
+        elif key == "RECURRENCE-ID":
+            event["recurrence_id"] = _ics_unescape_text(value)
+
+    return normalized
+
+
 async def fetch_feed_http(feed: Feed) -> Tuple[int, Optional[str], Optional[str], Optional[bytes]]:
     headers = {}
     if feed.http_etag:
@@ -154,17 +313,20 @@ async def fetch_feed_http(feed: Feed) -> Tuple[int, Optional[str], Optional[str]
 
 
 async def fetch_and_store_event_source(feed_id: int) -> List[int]:
-    """Fetch JSON events source and upsert into items.
+    """Fetch events source (JSON or ICS) and upsert into items.
 
-    Expected payload format:
+    For `feed.type=event_json`, expected payload format:
       {"events":[{"id":"...", "title":"...", "link":"...", "start_at":"ISO-8601"}]}
     or
       [{"id":"...", "title":"...", "link":"...", "start_at":"ISO-8601"}]
+
+    For `feed.type=event_ics`, expected payload is a standard iCalendar (.ics).
     """
     with session_scope() as s:
         feed = s.get(Feed, feed_id)
         if not feed or not feed.enabled:
             return []
+        feed_type = (feed.type or "").strip().lower()
 
     status, etag, last_modified, content = await fetch_feed_http(feed)
     with session_scope() as s:
@@ -177,14 +339,17 @@ async def fetch_and_store_event_source(feed_id: int) -> List[int]:
     if status != 200:
         return []
 
-    try:
-        payload = json.loads(content.decode("utf-8"))
-    except Exception:
-        return []
-
     settings = Settings()
     default_tz = ZoneInfo(settings.TZ or "UTC")
-    events = _normalized_event_rows(payload, default_tz)
+    events: list[dict[str, Any]]
+    if feed_type == "event_ics":
+        events = _normalized_ics_event_rows(content, default_tz, fallback_link=feed.url)
+    else:
+        try:
+            payload = json.loads(content.decode("utf-8"))
+        except Exception:
+            return []
+        events = _normalized_event_rows(payload, default_tz)
     if not events:
         return []
 
