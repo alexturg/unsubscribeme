@@ -21,6 +21,14 @@ class BotContext:
     bot: Bot
 
 
+def _to_utc_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 class BotScheduler:
     def __init__(self, bot: Bot) -> None:
         self.ctx = BotContext(bot=bot)
@@ -131,6 +139,7 @@ class BotScheduler:
             settings = Settings()
             if settings.HIDE_FUTURE_VIDEOS:
                 available_at = compute_available_at(item.title or "", item.published_at)
+                available_at = _to_utc_aware(available_at)
                 if available_at and datetime.now(timezone.utc) < available_at:
                     return
             if not matches_rules(content, rules):
@@ -212,7 +221,8 @@ class BotScheduler:
                 user = s.get(User, feed.user_id)
                 if not user or user.id != user_id:
                     continue
-                if not item.published_at or item.published_at > datetime.now(timezone.utc):
+                published_at = _to_utc_aware(item.published_at)
+                if not published_at or published_at > datetime.now(timezone.utc):
                     continue
 
                 delivered = (
@@ -285,7 +295,10 @@ class BotScheduler:
                 continue
             # Check if already sent today
             if feed.last_digest_at:
-                last_local = feed.last_digest_at.astimezone(tz)
+                last_digest_at = _to_utc_aware(feed.last_digest_at)
+                if not last_digest_at:
+                    continue
+                last_local = last_digest_at.astimezone(tz)
                 if last_local.date() == now_local.date():
                     continue
             await self._send_digest_for_feed(feed.id)
@@ -321,7 +334,10 @@ class BotScheduler:
                 if baseline.baseline_item_external_id and it.external_id == baseline.baseline_item_external_id:
                     return False
                 if baseline.baseline_published_at and it.published_at:
-                    return it.published_at > baseline.baseline_published_at
+                    left = _to_utc_aware(it.published_at)
+                    right = _to_utc_aware(baseline.baseline_published_at)
+                    if left and right:
+                        return left > right
                 # Fallback to creation time cutoff
                 ref = baseline.baseline_set_at
                 # created_at could be None for legacy rows
@@ -340,6 +356,7 @@ class BotScheduler:
                 )
                 if settings.HIDE_FUTURE_VIDEOS:
                     available_at = compute_available_at(it.title or "", it.published_at)
+                    available_at = _to_utc_aware(available_at)
                     if available_at and now_utc < available_at:
                         continue
                 if after_baseline(it) and matches_rules(content, rules):
@@ -426,6 +443,7 @@ class BotScheduler:
             settings = Settings()
             if settings.HIDE_FUTURE_VIDEOS:
                 available_at = compute_available_at(item.title or "", item.published_at)
+                available_at = _to_utc_aware(available_at)
                 if available_at and datetime.now(timezone.utc) < available_at:
                     return False, "not_available_yet"
             if not matches_rules(content, rules):

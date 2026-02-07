@@ -614,6 +614,12 @@ def compute_available_at(title: str, published_at: Optional[datetime]) -> Option
     settings = Settings()
     tz = ZoneInfo(settings.TZ or "UTC")
     now = datetime.now(tz)
+    published_utc: Optional[datetime] = None
+    if published_at is not None:
+        if published_at.tzinfo is None:
+            published_utc = published_at.replace(tzinfo=timezone.utc)
+        else:
+            published_utc = published_at.astimezone(timezone.utc)
 
     m = re.search(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?(?:\D{1,3}(\d{1,2}):(\d{2}))?", title)
     if m:
@@ -629,9 +635,9 @@ def compute_available_at(title: str, published_at: Optional[datetime]) -> Option
             dt_local = datetime(year, month, day, hour, minute, tzinfo=tz)
             dt_utc = dt_local.astimezone(timezone.utc)
             # If computed availability is earlier than published_at, keep published_at
-            if published_at and dt_utc <= published_at:
-                return published_at
+            if published_utc and dt_utc <= published_utc:
+                return published_utc
             return dt_utc
         except Exception:
             pass
-    return published_at
+    return published_utc

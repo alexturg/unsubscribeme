@@ -7,6 +7,7 @@ from rssbot.rss import (
     _extract_video_id,
     _normalized_event_rows,
     _normalized_ics_event_rows,
+    compute_available_at,
     fetch_and_store_event_source,
     fetch_and_store_latest_item,
 )
@@ -237,3 +238,11 @@ def test_fetch_and_store_event_source_ics(monkeypatch, tmp_path):
         assert items[0].title == "ICS Event One"
         assert items[0].link == "https://example.com/ics/1"
         assert items[0].published_at == datetime(2026, 2, 10, 16, 30)
+
+
+def test_compute_available_at_normalizes_naive_datetime():
+    naive_published = datetime(2026, 2, 10, 16, 30)
+    available = compute_available_at("No date in title", naive_published)
+    assert available is not None
+    assert available.tzinfo is not None
+    assert available.utcoffset() == timezone.utc.utcoffset(available)
