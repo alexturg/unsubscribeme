@@ -19,6 +19,8 @@ dependencies = [
   "APScheduler>=3.10.4",
   "pydantic>=2.6.0",
   "pydantic-settings>=2.2.1",
+  "youtube-transcript-api>=0.6.2",
+  "openai>=1.40.0",
 ]
 
 [project.scripts]

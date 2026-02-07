@@ -5,5 +5,7 @@ __all__ = [
     "rss",
     "scheduler",
     "bot",
+    "ai_summarizer",
+    "youtube_transcribe",
+    "youtube_summarize",
 ]
-

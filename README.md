@@ -14,6 +14,7 @@ Quick start:
 
 Core commands:
 - `/start` — register.
+- `/ai <youtube_url_or_video_id> [дополнительный фокус]` — расшифровать и сделать AI-суммаризацию видео.
 - `/addfeed <url> [mode=immediate|digest|on_demand] [label=...] [interval=10] [time=HH:MM]`
 - `/addeventsource <url> [label=...] [interval=1]` — add JSON events source (start notifications)
 - `/addevents [feed=<id>|<id>] [label=...] [interval=1]` + multiline rows in message — add events directly from Telegram text/CSV rows
@@ -25,6 +26,10 @@ Core commands:
 - `/setfilter <feed_id> <json>` — e.g. `{ "include_keywords": ["обзор"] }`
 - `/digest [feed_id|all]`
 - `/mute <feed_id>` / `/unmute <feed_id>`
+
+AI summary (`/ai`) setup:
+- Default mode is `openai`, set `OPENAI_API_KEY` in `.env`.
+- Optional tuning: `AI_SUMMARIZER_OPENAI_MODEL`, `AI_SUMMARIZER_LANGUAGES`, `AI_SUMMARIZER_MAX_SENTENCES`, `AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS`.
 
 JSON events source format:
 - Either an array of events, or an object with `events: []`.

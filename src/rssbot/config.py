@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=(".env",), env_prefix="", case_sensitive=False)
 
     TELEGRAM_BOT_TOKEN: str = Field(..., description="Telegram bot token")
+    OPENAI_API_KEY: Optional[str] = Field(
+        default=None,
+        description="OpenAI API key (used for /ai in openai mode)",
+    )
 
     # Comma-separated list of chat ids allowed to interact with the bot.
     ALLOWED_CHAT_IDS: Optional[str] = Field(
@@ -39,6 +43,26 @@ class Settings(BaseSettings):
     # Web UI host/port
     WEB_HOST: str = Field(default="127.0.0.1", description="Host for built-in web UI")
     WEB_PORT: int = Field(default=8080, description="Port for built-in web UI")
+
+    AI_SUMMARIZER_MODE: str = Field(
+        default="openai",
+        description="Summarization mode: openai or extractive",
+    )
+    AI_SUMMARIZER_OPENAI_MODEL: str = Field(
+        default="gpt-4.1-mini",
+        description="OpenAI model for internal AI summarizer in openai mode",
+    )
+    AI_SUMMARIZER_LANGUAGES: str = Field(
+        default="ru,en",
+        description="Transcript language priority, comma-separated",
+    )
+    AI_SUMMARIZER_MAX_SENTENCES: int = Field(default=7)
+    AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS: int = Field(default=0)
+    AI_SUMMARIZER_TIMEOUT_SEC: int = Field(default=600)
+    AI_SUMMARIZER_OUTPUT_DIR: Path = Field(
+        default=Path("data/ai_summaries"),
+        description="Directory for internal AI summarizer output files",
+    )
 
     def allowed_chat_ids(self) -> Optional[List[int]]:
         if not self.ALLOWED_CHAT_IDS:
