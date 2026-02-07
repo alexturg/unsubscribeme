@@ -108,6 +108,7 @@ def test_summarize_video_openai_custom_prompt(monkeypatch, tmp_path):
     assert calls["kwargs"]["custom_prompt"] == "только риски"
     assert calls["kwargs"]["max_input_words"] == 333
     assert calls["kwargs"]["api_key"] == "test-key"
+    assert calls["kwargs"]["target_language"] == "Russian"
 
 
 def test_summarize_video_invalid_mode(tmp_path):
@@ -121,3 +122,31 @@ def test_summarize_video_invalid_mode(tmp_path):
                 custom_prompt=None,
             )
         )
+
+
+def test_summarize_video_openai_english_prompt_language(monkeypatch, tmp_path):
+    settings = _settings(tmp_path)
+    calls = {}
+
+    monkeypatch.setattr(ai_summarizer, "extract_video_id", lambda _: "dQw4w9WgXcQ")
+    monkeypatch.setattr(
+        ai_summarizer,
+        "fetch_transcript",
+        lambda **_: [ai_summarizer.TranscriptSegment(text="Transcript text.", start=0.0, duration=1.0)],
+    )
+
+    def fake_openai_summary(text, **kwargs):
+        calls["kwargs"] = kwargs
+        return "- OpenAI bullet"
+
+    monkeypatch.setattr(ai_summarizer, "summarize_text_with_openai", fake_openai_summary)
+
+    asyncio.run(
+        ai_summarizer.summarize_video(
+            settings,
+            chat_id=2,
+            video_url="dQw4w9WgXcQ",
+            custom_prompt="what are pros and cons of each model",
+        )
+    )
+    assert calls["kwargs"]["target_language"] == "English"
