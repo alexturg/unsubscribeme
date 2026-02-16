@@ -65,6 +65,19 @@ def _summary_hash(entry: feedparser.FeedParserDict) -> Optional[str]:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
+def event_identity_hash(title: str, published_at: datetime) -> str:
+    normalized_title = re.sub(r"\s+", " ", (title or "")).strip().casefold()
+    published_utc = (
+        published_at.replace(tzinfo=timezone.utc)
+        if published_at.tzinfo is None
+        else published_at.astimezone(timezone.utc)
+    )
+    # Minute-level key is stable across ICS formatting variants.
+    published_key = published_utc.replace(second=0, microsecond=0).isoformat()
+    seed = f"{normalized_title}\n{published_key}"
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()
+
+
 def _parse_event_datetime(value: Any, default_tz: ZoneInfo) -> Optional[datetime]:
     if isinstance(value, (int, float)):
         try:
@@ -357,9 +370,7 @@ async def fetch_and_store_event_source(feed_id: int) -> List[int]:
     with session_scope() as s:
         f = s.get(Feed, feed_id)
         for event in events:
-            event_summary_hash = hashlib.sha1(
-                f"{event['title']}\n{event['link']}\n{event['published_at'].isoformat()}".encode("utf-8")
-            ).hexdigest()
+            event_summary_hash = event_identity_hash(event["title"], event["published_at"])
             existing = (
                 s.query(Item)
                 .filter(Item.feed_id == f.id, Item.external_id == event["external_id"])
