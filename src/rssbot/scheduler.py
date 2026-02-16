@@ -252,6 +252,22 @@ class BotScheduler:
                 if delivered:
                     continue
 
+                if item.summary_hash:
+                    delivered_same_event = (
+                        s.query(Delivery.id)
+                        .join(Item, Item.id == Delivery.item_id)
+                        .filter(
+                            Delivery.feed_id == feed.id,
+                            Delivery.user_id == user.id,
+                            Delivery.channel == "immediate",
+                            Item.feed_id == feed.id,
+                            Item.summary_hash == item.summary_hash,
+                        )
+                        .first()
+                    )
+                    if delivered_same_event:
+                        continue
+
                 content = Content(
                     title=item.title or "",
                     description="",
