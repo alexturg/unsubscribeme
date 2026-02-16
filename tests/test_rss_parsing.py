@@ -240,6 +240,70 @@ def test_fetch_and_store_event_source_ics(monkeypatch, tmp_path):
         assert items[0].published_at == datetime(2026, 2, 10, 16, 30)
 
 
+def test_fetch_and_store_event_source_ics_mutating_uid_does_not_duplicate(monkeypatch, tmp_path):
+    db_path = tmp_path / "bot.sqlite"
+    init_engine(db_path)
+
+    with session_scope() as s:
+        user = User(chat_id=889, tz="UTC")
+        s.add(user)
+        s.flush()
+        feed = Feed(
+            user_id=user.id,
+            url="https://example/events.ics",
+            type="event_ics",
+            enabled=True,
+            mode="immediate",
+            poll_interval_min=1,
+        )
+        s.add(feed)
+        s.flush()
+        feed_id = feed.id
+
+    payload_1 = (
+        "BEGIN:VCALENDAR\r\n"
+        "VERSION:2.0\r\n"
+        "BEGIN:VEVENT\r\n"
+        "UID:ics-evt-a\r\n"
+        "DTSTART:20260210T163000Z\r\n"
+        "SUMMARY:ICS Event One\r\n"
+        "URL:https://example.com/ics/1\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    ).encode("utf-8")
+    payload_2 = (
+        "BEGIN:VCALENDAR\r\n"
+        "VERSION:2.0\r\n"
+        "BEGIN:VEVENT\r\n"
+        "UID:ics-evt-b\r\n"
+        "DTSTART:20260210T163000Z\r\n"
+        "SUMMARY:ICS Event One\r\n"
+        "URL:https://example.com/ics/1\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    ).encode("utf-8")
+    payloads = [payload_1, payload_2]
+
+    async def fake_fetch_http(feed):
+        return 200, "etag-ics", "Wed, 10 Feb 2026 16:00:00 GMT", payloads.pop(0)
+
+    from rssbot import rss as rss_mod
+
+    monkeypatch.setattr(rss_mod, "fetch_feed_http", fake_fetch_http)
+
+    first_created = asyncio.run(fetch_and_store_event_source(feed_id))
+    second_created = asyncio.run(fetch_and_store_event_source(feed_id))
+    assert len(first_created) == 1
+    assert len(second_created) == 0
+
+    with session_scope() as s:
+        items = s.query(Item).filter(Item.feed_id == feed_id).all()
+        assert len(items) == 1
+        assert items[0].title == "ICS Event One"
+        assert items[0].link == "https://example.com/ics/1"
+        assert items[0].published_at == datetime(2026, 2, 10, 16, 30)
+
+
 def test_compute_available_at_normalizes_naive_datetime():
     naive_published = datetime(2026, 2, 10, 16, 30)
     available = compute_available_at("No date in title", naive_published)

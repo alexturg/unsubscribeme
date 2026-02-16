@@ -357,15 +357,27 @@ async def fetch_and_store_event_source(feed_id: int) -> List[int]:
     with session_scope() as s:
         f = s.get(Feed, feed_id)
         for event in events:
+            event_summary_hash = hashlib.sha1(
+                f"{event['title']}\n{event['link']}\n{event['published_at'].isoformat()}".encode("utf-8")
+            ).hexdigest()
             existing = (
                 s.query(Item)
                 .filter(Item.feed_id == f.id, Item.external_id == event["external_id"])
                 .first()
             )
+            # Some ICS providers mutate UID between polls for the same event.
+            # Fall back to a stable event fingerprint to avoid duplicate items.
+            if not existing and feed_type == "event_ics":
+                existing = (
+                    s.query(Item)
+                    .filter(Item.feed_id == f.id, Item.summary_hash == event_summary_hash)
+                    .first()
+                )
             if existing:
                 existing.title = event["title"]
                 existing.link = event["link"]
                 existing.published_at = event["published_at"]
+                existing.summary_hash = event_summary_hash
                 continue
             it = Item(
                 feed_id=f.id,
@@ -374,11 +386,7 @@ async def fetch_and_store_event_source(feed_id: int) -> List[int]:
                 link=event["link"],
                 published_at=event["published_at"],
                 categories=["event_start"],
-                summary_hash=hashlib.sha1(
-                    f"{event['title']}\n{event['link']}\n{event['published_at'].isoformat()}".encode(
-                        "utf-8"
-                    )
-                ).hexdigest(),
+                summary_hash=event_summary_hash,
             )
             s.add(it)
             s.flush()
