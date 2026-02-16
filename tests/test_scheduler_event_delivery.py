@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 from datetime import datetime, timedelta
 
 from rssbot.db import Delivery, Feed, FeedBaseline, Item, User, init_engine, session_scope
@@ -110,7 +109,7 @@ def test_deliver_due_event_starts_accepts_naive_item_datetime_and_no_repeat(tmp_
         assert deliveries[0].status == "ok"
 
 
-def test_deliver_due_event_starts_skips_duplicate_items_by_summary_hash(tmp_path):
+def test_deliver_due_event_starts_skips_duplicate_items_by_title_and_time(tmp_path):
     db_path = tmp_path / "bot.sqlite"
     init_engine(db_path)
 
@@ -139,9 +138,6 @@ def test_deliver_due_event_starts_skips_duplicate_items_by_summary_hash(tmp_path
         )
 
         published_at = datetime.utcnow() - timedelta(minutes=10)
-        summary_hash = hashlib.sha1(
-            f"Event One\nhttps://example.com/event/1\n{published_at.isoformat()}".encode("utf-8")
-        ).hexdigest()
         s.add(
             Item(
                 feed_id=feed_id,
@@ -149,17 +145,17 @@ def test_deliver_due_event_starts_skips_duplicate_items_by_summary_hash(tmp_path
                 title="Event One",
                 link="https://example.com/event/1",
                 published_at=published_at,
-                summary_hash=summary_hash,
+                summary_hash="hash-a",
             )
         )
         s.add(
             Item(
                 feed_id=feed_id,
                 external_id="evt-1-b",
-                title="Event One",
-                link="https://example.com/event/1",
+                title="  Event   One  ",
+                link="https://example.com/event/1?utm=2",
                 published_at=published_at,
-                summary_hash=summary_hash,
+                summary_hash="hash-b",
             )
         )
 

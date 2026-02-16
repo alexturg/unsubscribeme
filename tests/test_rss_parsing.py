@@ -240,7 +240,7 @@ def test_fetch_and_store_event_source_ics(monkeypatch, tmp_path):
         assert items[0].published_at == datetime(2026, 2, 10, 16, 30)
 
 
-def test_fetch_and_store_event_source_ics_mutating_uid_does_not_duplicate(monkeypatch, tmp_path):
+def test_fetch_and_store_event_source_ics_mutating_uid_and_link_does_not_duplicate(monkeypatch, tmp_path):
     db_path = tmp_path / "bot.sqlite"
     init_engine(db_path)
 
@@ -278,7 +278,7 @@ def test_fetch_and_store_event_source_ics_mutating_uid_does_not_duplicate(monkey
         "UID:ics-evt-b\r\n"
         "DTSTART:20260210T163000Z\r\n"
         "SUMMARY:ICS Event One\r\n"
-        "URL:https://example.com/ics/1\r\n"
+        "URL:https://example.com/ics/1?token=2\r\n"
         "END:VEVENT\r\n"
         "END:VCALENDAR\r\n"
     ).encode("utf-8")
@@ -300,7 +300,7 @@ def test_fetch_and_store_event_source_ics_mutating_uid_does_not_duplicate(monkey
         items = s.query(Item).filter(Item.feed_id == feed_id).all()
         assert len(items) == 1
         assert items[0].title == "ICS Event One"
-        assert items[0].link == "https://example.com/ics/1"
+        assert items[0].link == "https://example.com/ics/1?token=2"
         assert items[0].published_at == datetime(2026, 2, 10, 16, 30)
 
 

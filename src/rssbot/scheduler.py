@@ -12,7 +12,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .db import Delivery, Feed, Item, User, session_scope, FeedBaseline
 from .rules import Content, matches_rules
-from .rss import fetch_and_store_event_source, fetch_and_store_feed, compute_available_at
+from .rss import compute_available_at, event_identity_hash, fetch_and_store_event_source, fetch_and_store_feed
 from .config import Settings
 
 
@@ -222,6 +222,24 @@ class BotScheduler:
 
             due_item_ids = [row[0] for row in due_query.all()]
             user_id = user.id
+            delivered_event_keys: set[str] = set()
+            delivered_rows = (
+                s.query(Item.title, Item.published_at)
+                .join(Delivery, Delivery.item_id == Item.id)
+                .filter(
+                    Delivery.feed_id == feed_id,
+                    Delivery.user_id == user_id,
+                    Delivery.channel == "immediate",
+                    Item.feed_id == feed_id,
+                    Item.published_at.isnot(None),
+                )
+                .all()
+            )
+            for title_raw, published_raw in delivered_rows:
+                published_at = _to_utc_aware(published_raw)
+                if not published_at:
+                    continue
+                delivered_event_keys.add(event_identity_hash(str(title_raw or ""), published_at))
 
         sent = 0
         for item_id in due_item_ids:
@@ -238,6 +256,9 @@ class BotScheduler:
                 published_at = _to_utc_aware(item.published_at)
                 if not published_at or published_at > datetime.now(timezone.utc):
                     continue
+                event_key = event_identity_hash(item.title or "", published_at)
+                if event_key in delivered_event_keys:
+                    continue
 
                 delivered = (
                     s.query(Delivery.id)
@@ -251,22 +272,6 @@ class BotScheduler:
                 )
                 if delivered:
                     continue
-
-                if item.summary_hash:
-                    delivered_same_event = (
-                        s.query(Delivery.id)
-                        .join(Item, Item.id == Delivery.item_id)
-                        .filter(
-                            Delivery.feed_id == feed.id,
-                            Delivery.user_id == user.id,
-                            Delivery.channel == "immediate",
-                            Item.feed_id == feed.id,
-                            Item.summary_hash == item.summary_hash,
-                        )
-                        .first()
-                    )
-                    if delivered_same_event:
-                        continue
 
                 content = Content(
                     title=item.title or "",
@@ -283,6 +288,7 @@ class BotScheduler:
                 user_id_v = user.id
                 title = item.title or "(без названия)"
                 link = item.link or ""
+                event_key_v = event_key
 
             status, error = await self._send_event_start_message(chat_id, title, link)
             with session_scope() as s:
@@ -298,6 +304,7 @@ class BotScheduler:
                 )
             if status == "ok":
                 sent += 1
+            delivered_event_keys.add(event_key_v)
         return sent
 
     async def _digest_scan_tick(self) -> None:
