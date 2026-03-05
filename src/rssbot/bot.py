@@ -495,18 +495,13 @@ def _format_duration_hhmmss(total_seconds: Optional[int]) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
-def _format_size_mb(size_bytes: Optional[int]) -> str:
-    if size_bytes is None or size_bytes < 0:
-        return "unknown"
-    return f"{size_bytes / (1024 * 1024):.1f} MB"
-
-
-def _video_info_text(info_title: str, duration_seconds: Optional[int], size_bytes: Optional[int]) -> str:
+def _video_info_text(info_title: str, duration_seconds: Optional[int], video_id: str) -> str:
     title = info_title.strip() if info_title else "(без названия)"
+    watch_url = f"https://www.youtube.com/watch?v={video_id}"
     return (
         f"Видео: {title}\n"
         f"Длительность: {_format_duration_hhmmss(duration_seconds)}\n"
-        f"Размер видео: {_format_size_mb(size_bytes)}"
+        f"Оригинал: {watch_url}"
     )
 
 
@@ -755,7 +750,6 @@ async def cmd_transcribe(message: Message) -> None:
 
     info_title = ""
     info_duration: Optional[int] = None
-    info_size: Optional[int] = None
     try:
         info = await asyncio.to_thread(
             fetch_video_info,
@@ -765,7 +759,6 @@ async def cmd_transcribe(message: Message) -> None:
         )
         info_title = info.title
         info_duration = info.duration_seconds
-        info_size = info.filesize_bytes if info.filesize_bytes is not None else info.filesize_approx_bytes
     except Exception:
         pass
 
@@ -779,7 +772,7 @@ async def cmd_transcribe(message: Message) -> None:
         if not _looks_like_missing_subtitles_error(exc):
             await message.answer(html_escape(f"Не удалось получить субтитры: {exc}", quote=False))
             return
-        details = _video_info_text(info_title, info_duration, info_size)
+        details = _video_info_text(info_title, info_duration, video_id)
         await message.answer(
             html_escape(
                 "Субтитры у видео не найдены.\n"
@@ -806,7 +799,7 @@ async def cmd_transcribe(message: Message) -> None:
         await message.answer("Транскрипт слишком большой для отправки одним TXT-файлом.")
         return
 
-    details = _video_info_text(info_title, info_duration, info_size)
+    details = _video_info_text(info_title, info_duration, video_id)
     await message.answer_document(
         document=BufferedInputFile(
             payload,
