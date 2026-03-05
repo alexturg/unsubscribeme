@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
 from typing import Optional
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
@@ -27,6 +28,14 @@ def _to_utc_aware(dt: Optional[datetime]) -> Optional[datetime]:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _is_youtube_link(link: str) -> bool:
+    parsed = urlparse((link or "").strip())
+    host = (parsed.netloc or "").lower()
+    return host.endswith("youtube.com") or host.endswith("www.youtube.com") or host.endswith(
+        "youtu.be"
+    )
 
 
 class BotScheduler:
@@ -106,12 +115,20 @@ class BotScheduler:
             return "fail", str(e)[:1000]
 
     async def _send_video_message(
-        self, chat_id: int, title: str, link: str, feed_name: Optional[str] = None
+        self,
+        chat_id: int,
+        title: str,
+        link: str,
+        feed_name: Optional[str] = None,
+        item_id: Optional[int] = None,
     ) -> tuple[str, Optional[str]]:
         normalized_feed_name = (feed_name or "").strip()
         feed_name_text = normalized_feed_name or "без названия ленты"
         text = f"Новый ролик: {title} [{feed_name_text}]"
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть", url=link)]])
+        row = [InlineKeyboardButton(text="Открыть", url=link)]
+        if item_id is not None and link and _is_youtube_link(link):
+            row.append(InlineKeyboardButton(text="Сделать /ai", callback_data=f"ai:item:{item_id}"))
+        kb = InlineKeyboardMarkup(inline_keyboard=[row])
         try:
             await self.ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
             return "ok", None
@@ -168,7 +185,9 @@ class BotScheduler:
             feed_name = (feed.label or feed.name or "").strip()
 
         # Send message outside of transaction
-        status, error = await self._send_video_message(chat_id, title, link, feed_name)
+        status, error = await self._send_video_message(
+            chat_id, title, link, feed_name, item_id=item_id_v
+        )
 
         with session_scope() as s:
             s.add(
@@ -422,7 +441,7 @@ class BotScheduler:
         send_results = []
         for info in kept_info:
             status, error = await self._send_video_message(
-                chat_id, info["title"], info["link"], feed_name
+                chat_id, info["title"], info["link"], feed_name, item_id=info["id"]
             )
             send_results.append(
                 {
@@ -494,7 +513,9 @@ class BotScheduler:
         link = item.link or ""
         is_digest_mode = feed.mode == "digest"
 
-        status, error = await self._send_video_message(chat_id, title, link, feed_name)
+        status, error = await self._send_video_message(
+            chat_id, title, link, feed_name, item_id=item_id
+        )
 
         now = datetime.now(timezone.utc)
         with session_scope() as s:
