@@ -395,7 +395,7 @@ def _resolve_feed_display_url(feed_url: str) -> Optional[str]:
     qs = parse_qs(parsed.query or "")
     channel_id = (qs.get("channel_id") or [""])[0].strip()
     if channel_id:
-        return f"https://www.youtube.com/channel/{channel_id}"
+        return f"https://www.youtube.com/channel/{channel_id}/videos"
     playlist_id = (qs.get("playlist_id") or [""])[0].strip()
     if playlist_id:
         return f"https://www.youtube.com/playlist?list={playlist_id}"
