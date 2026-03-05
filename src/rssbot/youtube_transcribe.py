@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
+import json
 import re
 import subprocess
 import tempfile
@@ -22,6 +23,10 @@ class WhisperTranscriptionError(RuntimeError):
     """Raised when Whisper-based transcription fails."""
 
 
+class YouTubeMediaError(RuntimeError):
+    """Raised when YouTube media metadata/audio download fails."""
+
+
 @dataclass(frozen=True)
 class TranscriptSegment:
     text: str
@@ -30,6 +35,15 @@ class TranscriptSegment:
 
     def to_dict(self) -> dict[str, float | str]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class YouTubeVideoInfo:
+    video_id: str
+    title: str
+    duration_seconds: int | None
+    filesize_bytes: int | None
+    filesize_approx_bytes: int | None
 
 
 def extract_video_id(url_or_id: str) -> str:
@@ -62,6 +76,76 @@ def extract_video_id(url_or_id: str) -> str:
     raise ValueError(
         "Could not parse YouTube video ID. Provide a full URL like "
         "https://www.youtube.com/watch?v=... or a raw 11-char video ID."
+    )
+
+
+def _as_int(value: object) -> int | None:
+    try:
+        result = int(value)  # type: ignore[arg-type]
+    except Exception:
+        return None
+    return result if result >= 0 else None
+
+
+def fetch_video_info(
+    video_url_or_id: str,
+    *,
+    yt_dlp_binary: str = "yt-dlp",
+    timeout_sec: int = 90,
+) -> YouTubeVideoInfo:
+    video_id = extract_video_id(video_url_or_id)
+    watch_url = f"https://www.youtube.com/watch?v={video_id}"
+    cmd = [
+        yt_dlp_binary,
+        "--skip-download",
+        "--no-playlist",
+        "--quiet",
+        "--no-warnings",
+        "--dump-single-json",
+        watch_url,
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=max(10, timeout_sec),
+        )
+    except FileNotFoundError as exc:
+        raise YouTubeMediaError(f"yt-dlp binary not found: {yt_dlp_binary}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise YouTubeMediaError(f"yt-dlp metadata timeout ({timeout_sec} sec)") from exc
+    except Exception as exc:
+        raise YouTubeMediaError(f"yt-dlp metadata error: {exc}") from exc
+
+    if proc.returncode != 0:
+        details = _normalize_space(proc.stderr or proc.stdout or "")[:300]
+        raise YouTubeMediaError(
+            "yt-dlp could not load video metadata."
+            + (f" Details: {details}" if details else "")
+        )
+
+    try:
+        payload = json.loads(proc.stdout)
+    except Exception as exc:
+        raise YouTubeMediaError(f"yt-dlp metadata parse error: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise YouTubeMediaError("yt-dlp metadata payload is invalid.")
+
+    title = str(payload.get("title") or "").strip()
+    duration_seconds = _as_int(payload.get("duration"))
+    filesize_bytes = _as_int(payload.get("filesize"))
+    filesize_approx_bytes = _as_int(payload.get("filesize_approx"))
+
+    return YouTubeVideoInfo(
+        video_id=video_id,
+        title=title,
+        duration_seconds=duration_seconds,
+        filesize_bytes=filesize_bytes,
+        filesize_approx_bytes=filesize_approx_bytes,
     )
 
 
@@ -196,6 +280,52 @@ def _download_audio_for_whisper(
             "Whisper fallback: yt-dlp не создал аудиофайл для транскрипции."
         )
 
+    return audio_candidates[0]
+
+
+def download_audio_for_export(
+    video_url_or_id: str,
+    *,
+    output_dir: Path,
+    yt_dlp_binary: str = "yt-dlp",
+    timeout_sec: int = 240,
+    audio_format: str = "mp3",
+    audio_quality: str = "5",
+) -> Path:
+    video_id = extract_video_id(video_url_or_id)
+    watch_url = f"https://www.youtube.com/watch?v={video_id}"
+    output_template = str((output_dir / f"{video_id}.%(ext)s").resolve())
+    cmd = [
+        yt_dlp_binary,
+        "--no-playlist",
+        "--quiet",
+        "--no-warnings",
+        "--extract-audio",
+        "--audio-format",
+        audio_format,
+        "--audio-quality",
+        str(audio_quality),
+        "--output",
+        output_template,
+        watch_url,
+    ]
+    try:
+        _run_subprocess_checked(
+            cmd,
+            timeout_sec=max(10, timeout_sec),
+            fail_message="Audio export failed: yt-dlp download error",
+        )
+    except WhisperTranscriptionError as exc:
+        raise YouTubeMediaError(str(exc)) from exc
+
+    candidates = sorted(output_dir.glob(f"{video_id}.*"))
+    audio_candidates = [
+        path
+        for path in candidates
+        if path.suffix.lower() not in {".part", ".ytdl"} and path.is_file()
+    ]
+    if not audio_candidates:
+        raise YouTubeMediaError("Audio export failed: yt-dlp did not produce an audio file.")
     return audio_candidates[0]
 
 

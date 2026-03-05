@@ -7,13 +7,22 @@ import json
 import logging
 from datetime import datetime, timezone
 from dataclasses import dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Awaitable, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from .config import Settings
 from .db import Delivery, Feed, FeedBaseline, FeedRule, Item, Session, User, session_scope
@@ -25,7 +34,17 @@ from .ai_summarizer import (
     split_message_chunks,
     summarize_video,
 )
-from .youtube_transcribe import extract_video_id
+from .youtube_transcribe import (
+    TranscriptError,
+    TranscriptSegment,
+    WhisperTranscriptionError,
+    YouTubeMediaError,
+    download_audio_for_export,
+    extract_video_id,
+    fetch_transcript,
+    fetch_video_info,
+    transcribe_video_with_whisper,
+)
 from utils.yt_channel_id import get_channel_id
 
 
@@ -88,8 +107,8 @@ async def cmd_start(message: Message) -> None:
     await message.answer(
         "Привет! Настраивать ленты теперь удобнее в веб-интерфейсе.\n"
         f"Открой: {web_link}\n\n"
-        "Команды: /ai, /addfeed, /addeventsource, /addics, /addevents, /youtube, /channel, /playlist, "
-        "/list, /remove, /setmode, /setfilter, /digest, /mute, /unmute"
+        "Команды: /ai, /audio, /transcribe, /addfeed, /addeventsource, /addics, /addevents, "
+        "/youtube, /channel, /playlist, /list, /remove, /setmode, /setfilter, /digest, /mute, /unmute"
     )
 
 
@@ -426,6 +445,90 @@ def _format_feed_list_line(feed: Feed) -> str:
     return f"{status} {feed.id}: {title} — {safe_mode}{time_part} [{safe_type}]"
 
 
+TRANSCRIBE_WHISPER_CONFIRM_PREFIX = "transcribe:whisper:"
+TRANSCRIPT_MISSING_MARKERS = (
+    "no transcripts were found",
+    "transcriptsdisabled",
+    "transcript is disabled",
+    "subtitles are disabled",
+    "requested transcript is not available",
+    "no transcript",
+)
+
+
+def _format_timestamp(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _parse_command_single_arg(raw_text: str, *, command_name: str) -> str:
+    parts = (raw_text or "").strip().split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        raise ValueError(f"Использование: /{command_name} <youtube_url_or_video_id>")
+    return parts[1].strip().split(maxsplit=1)[0]
+
+
+def _render_transcript_txt(segments: list[TranscriptSegment]) -> str:
+    lines: list[str] = []
+    for segment in segments:
+        text = (segment.text or "").strip()
+        if not text:
+            continue
+        lines.append(f"[{_format_timestamp(segment.start)}] {text}")
+    return "\n".join(lines).strip()
+
+
+def _looks_like_missing_subtitles_error(exc: TranscriptError) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in TRANSCRIPT_MISSING_MARKERS)
+
+
+def _format_duration_hhmmss(total_seconds: Optional[int]) -> str:
+    if total_seconds is None or total_seconds < 0:
+        return "unknown"
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _format_size_mb(size_bytes: Optional[int]) -> str:
+    if size_bytes is None or size_bytes < 0:
+        return "unknown"
+    return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
+def _video_info_text(info_title: str, duration_seconds: Optional[int], size_bytes: Optional[int]) -> str:
+    title = info_title.strip() if info_title else "(без названия)"
+    return (
+        f"Видео: {title}\n"
+        f"Длительность: {_format_duration_hhmmss(duration_seconds)}\n"
+        f"Размер видео: {_format_size_mb(size_bytes)}"
+    )
+
+
+def _transcript_document_name(video_id: str, source_label: str) -> str:
+    safe_source = "".join(ch for ch in source_label.lower() if ch.isalnum() or ch in {"_", "-"}).strip("-_")
+    safe_source = safe_source or "source"
+    return f"{video_id}_transcript_{safe_source}.txt"
+
+
+def _whisper_confirm_keyboard(video_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Подтвердить Whisper-транскрибацию",
+                    callback_data=f"{TRANSCRIBE_WHISPER_CONFIRM_PREFIX}{video_id}",
+                )
+            ]
+        ]
+    )
+
+
 async def _extract_youtube_channel_id(url: str) -> Optional[str]:
     """Extract YouTube channel_id from a URL using utils.yt_channel_id."""
     try:
@@ -511,6 +614,244 @@ async def _run_ai_summary(
     for chunk in split_message_chunks(response_text):
         if not await _safe_send(chunk):
             return
+
+
+def _transcript_languages_from_settings() -> list[str]:
+    raw = (getattr(DEPS.settings, "AI_SUMMARIZER_LANGUAGES", "") or "").strip()
+    languages = [part.strip() for part in raw.split(",") if part.strip()]
+    return languages or ["en"]
+
+
+async def _run_whisper_transcription_to_txt(
+    *,
+    chat_id: int,
+    video_id: str,
+    send_text: Callable[[str], Awaitable[None]],
+    send_document: Callable[[BufferedInputFile, str], Awaitable[None]],
+) -> None:
+    await send_text("Запускаю Whisper-транскрибацию. Это может занять 30-180 секунд.")
+
+    try:
+        transcript_text = await asyncio.to_thread(
+            transcribe_video_with_whisper,
+            video_id,
+            model=str(getattr(DEPS.settings, "AI_SUMMARIZER_WHISPER_MODEL", "whisper-1")),
+            api_key=getattr(DEPS.settings, "OPENAI_API_KEY", None),
+            max_audio_megabytes=max(
+                8,
+                int(getattr(DEPS.settings, "AI_SUMMARIZER_WHISPER_MAX_AUDIO_MB", 24)),
+            ),
+            download_timeout_sec=max(
+                20,
+                int(getattr(DEPS.settings, "AI_SUMMARIZER_WHISPER_DOWNLOAD_TIMEOUT_SEC", 240)),
+            ),
+            yt_dlp_binary=str(getattr(DEPS.settings, "AI_SUMMARIZER_WHISPER_YTDLP_BINARY", "yt-dlp")),
+        )
+    except (WhisperTranscriptionError, ValueError) as exc:
+        await send_text(f"Не удалось сделать Whisper-транскрибацию: {exc}")
+        return
+    except Exception as exc:
+        logging.error("Unexpected whisper transcription failure for chat_id=%s: %s", chat_id, exc, exc_info=True)
+        await send_text("Внутренняя ошибка при Whisper-транскрибации.")
+        return
+
+    payload = (transcript_text.strip() + "\n").encode("utf-8")
+    max_bytes = 48 * 1024 * 1024
+    if len(payload) > max_bytes:
+        await send_text("Транскрипт слишком большой для отправки одним TXT-файлом.")
+        return
+
+    doc_name = _transcript_document_name(video_id, "whisper")
+    await send_document(
+        BufferedInputFile(payload, filename=doc_name),
+        f"Готово. Транскрипция из Whisper.\nВидео: https://www.youtube.com/watch?v={video_id}",
+    )
+
+
+@router.message(Command("audio"))
+async def cmd_audio(message: Message) -> None:
+    user_id = _ensure_user_id(message)
+    if not user_id:
+        await message.answer("Доступ запрещен.")
+        return
+
+    try:
+        arg = _parse_command_single_arg(message.text or "", command_name="audio")
+        video_id = extract_video_id(arg)
+    except ValueError as exc:
+        await message.answer(html_escape(str(exc), quote=False))
+        return
+
+    await message.answer("Готовлю аудио-файл из YouTube. Это может занять 20-90 секунд.")
+
+    info_text = ""
+    try:
+        info = await asyncio.to_thread(
+            fetch_video_info,
+            video_id,
+            yt_dlp_binary=str(getattr(DEPS.settings, "AI_SUMMARIZER_WHISPER_YTDLP_BINARY", "yt-dlp")),
+            timeout_sec=60,
+        )
+        size_hint = info.filesize_bytes if info.filesize_bytes is not None else info.filesize_approx_bytes
+        info_text = _video_info_text(info.title, info.duration_seconds, size_hint)
+    except Exception:
+        info_text = f"Видео: https://www.youtube.com/watch?v={video_id}\nРазмер видео: unknown"
+
+    max_audio_send_bytes = int(getattr(DEPS.settings, "AI_AUDIO_EXPORT_MAX_BYTES", 48 * 1024 * 1024))
+
+    try:
+        with TemporaryDirectory(prefix="yt_audio_export_") as tmp_dir:
+            audio_path = await asyncio.to_thread(
+                download_audio_for_export,
+                video_id,
+                output_dir=Path(tmp_dir),
+                yt_dlp_binary=str(getattr(DEPS.settings, "AI_SUMMARIZER_WHISPER_YTDLP_BINARY", "yt-dlp")),
+                timeout_sec=max(
+                    20,
+                    int(getattr(DEPS.settings, "AI_SUMMARIZER_WHISPER_DOWNLOAD_TIMEOUT_SEC", 240)),
+                ),
+            )
+            audio_size = audio_path.stat().st_size
+            if audio_size > max_audio_send_bytes:
+                await message.answer(
+                    html_escape(
+                        "Аудиофайл слишком большой для отправки в Telegram "
+                        f"({_format_size_mb(audio_size)} > {_format_size_mb(max_audio_send_bytes)}).\n{info_text}",
+                        quote=False,
+                    )
+                )
+                return
+
+            await message.answer_document(
+                document=FSInputFile(str(audio_path)),
+                caption=html_escape(
+                    f"Аудио готово.\n{info_text}\nРазмер аудио: {_format_size_mb(audio_size)}",
+                    quote=False,
+                ),
+            )
+    except (YouTubeMediaError, OSError, ValueError) as exc:
+        await message.answer(html_escape(f"Не удалось выгрузить аудио: {exc}", quote=False))
+    except Exception as exc:
+        logging.error("Unexpected /audio failure for chat_id=%s: %s", message.chat.id, exc, exc_info=True)
+        await message.answer("Внутренняя ошибка при выгрузке аудио.")
+
+
+@router.message(Command("transcribe"))
+async def cmd_transcribe(message: Message) -> None:
+    user_id = _ensure_user_id(message)
+    if not user_id:
+        await message.answer("Доступ запрещен.")
+        return
+
+    try:
+        arg = _parse_command_single_arg(message.text or "", command_name="transcribe")
+        video_id = extract_video_id(arg)
+    except ValueError as exc:
+        await message.answer(html_escape(str(exc), quote=False))
+        return
+
+    await message.answer("Проверяю субтитры и готовлю транскрипт.")
+
+    info_title = ""
+    info_duration: Optional[int] = None
+    info_size: Optional[int] = None
+    try:
+        info = await asyncio.to_thread(
+            fetch_video_info,
+            video_id,
+            yt_dlp_binary=str(getattr(DEPS.settings, "AI_SUMMARIZER_WHISPER_YTDLP_BINARY", "yt-dlp")),
+            timeout_sec=60,
+        )
+        info_title = info.title
+        info_duration = info.duration_seconds
+        info_size = info.filesize_bytes if info.filesize_bytes is not None else info.filesize_approx_bytes
+    except Exception:
+        pass
+
+    try:
+        segments = await asyncio.to_thread(
+            fetch_transcript,
+            video_id=video_id,
+            languages=_transcript_languages_from_settings(),
+        )
+    except TranscriptError as exc:
+        if not _looks_like_missing_subtitles_error(exc):
+            await message.answer(html_escape(f"Не удалось получить субтитры: {exc}", quote=False))
+            return
+        details = _video_info_text(info_title, info_duration, info_size)
+        await message.answer(
+            html_escape(
+                "Субтитры у видео не найдены.\n"
+                "Можно сделать транскрипцию через Whisper (OpenAI).\n"
+                f"{details}",
+                quote=False,
+            ),
+            reply_markup=_whisper_confirm_keyboard(video_id),
+        )
+        return
+    except Exception as exc:
+        logging.error("Unexpected /transcribe subtitles failure for chat_id=%s: %s", message.chat.id, exc, exc_info=True)
+        await message.answer("Внутренняя ошибка при получении субтитров.")
+        return
+
+    transcript_text = _render_transcript_txt(segments)
+    if not transcript_text:
+        await message.answer("Субтитры были получены, но текст пустой.")
+        return
+
+    payload = (transcript_text.strip() + "\n").encode("utf-8")
+    max_bytes = 48 * 1024 * 1024
+    if len(payload) > max_bytes:
+        await message.answer("Транскрипт слишком большой для отправки одним TXT-файлом.")
+        return
+
+    details = _video_info_text(info_title, info_duration, info_size)
+    await message.answer_document(
+        document=BufferedInputFile(
+            payload,
+            filename=_transcript_document_name(video_id, "captions"),
+        ),
+        caption=html_escape(f"Готово. Транскрипция из субтитров.\n{details}", quote=False),
+    )
+
+
+@router.callback_query(F.data.startswith(TRANSCRIBE_WHISPER_CONFIRM_PREFIX))
+async def cb_transcribe_whisper_confirm(callback: CallbackQuery) -> None:
+    message = callback.message
+    if message is None:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+
+    chat_id = message.chat.id
+    if not _is_allowed(chat_id):
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
+
+    raw_data = callback.data or ""
+    try:
+        video_id = extract_video_id(raw_data.split(TRANSCRIBE_WHISPER_CONFIRM_PREFIX, 1)[1])
+    except Exception:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+
+    await callback.answer("Подтверждено. Запускаю Whisper...")
+
+    async def _send_text(text: str) -> None:
+        await callback.bot.send_message(chat_id=chat_id, text=html_escape(text, quote=False))
+
+    async def _send_document(doc: BufferedInputFile, caption: str) -> None:
+        await callback.bot.send_document(
+            chat_id=chat_id,
+            document=doc,
+            caption=html_escape(caption, quote=False),
+        )
+
+    await _run_whisper_transcription_to_txt(
+        chat_id=chat_id,
+        video_id=video_id,
+        send_text=_send_text,
+        send_document=_send_document,
+    )
 
 
 @router.message(Command("ai"))
