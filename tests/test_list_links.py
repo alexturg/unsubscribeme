@@ -4,7 +4,7 @@ from rssbot.db import Feed
 
 def test_resolve_feed_display_url_for_channel():
     url = "https://www.youtube.com/feeds/videos.xml?channel_id=UC_x5XG1OV2P6uZZ5FSM9Ttw"
-    assert _resolve_feed_display_url(url) == "https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw"
+    assert _resolve_feed_display_url(url) == "https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw/videos"
 
 
 def test_resolve_feed_display_url_for_playlist():
@@ -32,7 +32,7 @@ def test_format_feed_list_line_adds_clickable_title_for_youtube():
 
     line = _format_feed_list_line(feed)
     assert line.startswith("✓ 7:")
-    assert '<a href="https://www.youtube.com/channel/UC123">Best &lt;Channel&gt;</a>' in line
+    assert '<a href="https://www.youtube.com/channel/UC123/videos">Best &lt;Channel&gt;</a>' in line
     assert " — digest в 08:30 [youtube]" in line
 
 
