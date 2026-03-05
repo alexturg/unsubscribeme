@@ -58,6 +58,22 @@ class Settings(BaseSettings):
     )
     AI_SUMMARIZER_MAX_SENTENCES: int = Field(default=7)
     AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS: int = Field(default=0)
+    AI_SUMMARIZER_WEB_OPENAI_MAX_INPUT_WORDS: int = Field(
+        default=1400,
+        description="Fallback max input words for web-page summarization in OpenAI mode",
+    )
+    AI_SUMMARIZER_WEB_FETCH_TIMEOUT_SEC: int = Field(
+        default=15,
+        description="Timeout for loading web pages in /ai mode",
+    )
+    AI_SUMMARIZER_WEB_MAX_RESPONSE_BYTES: int = Field(
+        default=2_000_000,
+        description="Max bytes to download from a web page before extraction",
+    )
+    AI_SUMMARIZER_WEB_MAX_EXTRACTED_WORDS: int = Field(
+        default=4500,
+        description="Max words kept after HTML cleanup before summarization",
+    )
     AI_SUMMARIZER_TIMEOUT_SEC: int = Field(default=600)
     AI_SUMMARIZER_OUTPUT_DIR: Path = Field(
         default=Path("data/ai_summaries"),
