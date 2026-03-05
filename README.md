@@ -14,7 +14,7 @@ Quick start:
 
 Core commands:
 - `/start` — register.
-- `/ai <youtube_url_or_video_id> [дополнительный фокус]` — расшифровать и сделать AI-суммаризацию видео.
+- `/ai <youtube_url_or_video_id_or_page_url> [дополнительный фокус]` — сделать AI-суммаризацию YouTube-видео или обычной веб-страницы.
 - `/addfeed <url> [mode=immediate|digest|on_demand] [label=...] [interval=10] [time=HH:MM]`
 - `/addeventsource <url> [type=json|ics] [label=...] [interval=1]` — add events source (start notifications)
 - `/addics <url> [label=...] [interval=1]` — add ICS calendar events source (start notifications)
@@ -31,6 +31,8 @@ Core commands:
 AI summary (`/ai`) setup:
 - Default mode is `openai`, set `OPENAI_API_KEY` in `.env`.
 - Optional tuning: `AI_SUMMARIZER_OPENAI_MODEL`, `AI_SUMMARIZER_LANGUAGES`, `AI_SUMMARIZER_MAX_SENTENCES`, `AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS`.
+- Web page mode tuning: `AI_SUMMARIZER_WEB_OPENAI_MAX_INPUT_WORDS`, `AI_SUMMARIZER_WEB_FETCH_TIMEOUT_SEC`, `AI_SUMMARIZER_WEB_MAX_RESPONSE_BYTES`, `AI_SUMMARIZER_WEB_MAX_EXTRACTED_WORDS`.
+- Security note: web-page summarization blocks private/local addresses and accepts only `http/https`.
 
 JSON events source format:
 - Either an array of events, or an object with `events: []`.

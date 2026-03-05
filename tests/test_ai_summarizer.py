@@ -6,6 +6,7 @@ import pytest
 
 from rssbot import ai_summarizer
 from rssbot.ai_summarizer import AiSummarizerError, parse_ai_request_text, split_message_chunks
+from rssbot.web_summarize import WebPageContent
 
 
 def _settings(tmp_path: Path, **overrides):
@@ -16,6 +17,10 @@ def _settings(tmp_path: Path, **overrides):
         "AI_SUMMARIZER_LANGUAGES": "ru,en",
         "AI_SUMMARIZER_MAX_SENTENCES": 7,
         "AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS": 0,
+        "AI_SUMMARIZER_WEB_OPENAI_MAX_INPUT_WORDS": 1400,
+        "AI_SUMMARIZER_WEB_FETCH_TIMEOUT_SEC": 15,
+        "AI_SUMMARIZER_WEB_MAX_RESPONSE_BYTES": 2_000_000,
+        "AI_SUMMARIZER_WEB_MAX_EXTRACTED_WORDS": 4500,
         "AI_SUMMARIZER_TIMEOUT_SEC": 60,
         "AI_SUMMARIZER_OUTPUT_DIR": tmp_path / "ai",
     }
@@ -150,3 +155,40 @@ def test_summarize_video_openai_english_prompt_language(monkeypatch, tmp_path):
         )
     )
     assert calls["kwargs"]["target_language"] == "English"
+
+
+def test_summarize_video_web_page_openai(monkeypatch, tmp_path):
+    settings = _settings(tmp_path, AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS=0)
+    calls = {}
+
+    monkeypatch.setattr(
+        ai_summarizer,
+        "fetch_webpage_content",
+        lambda *args, **kwargs: WebPageContent(
+            source_url="https://example.com/page",
+            title="Example title",
+            cleaned_text="First factual paragraph.\nSecond factual paragraph.",
+        ),
+    )
+
+    def fake_openai_summary(text, **kwargs):
+        calls["text"] = text
+        calls["kwargs"] = kwargs
+        return "- Web bullet"
+
+    monkeypatch.setattr(ai_summarizer, "summarize_text_with_openai", fake_openai_summary)
+
+    result = asyncio.run(
+        ai_summarizer.summarize_video(
+            settings,
+            chat_id=5,
+            video_url="https://example.com/page",
+            custom_prompt="сфокусируйся на рисках",
+        )
+    )
+
+    assert result.summary_text == "- Web bullet"
+    assert result.transcript_path is not None and result.transcript_path.exists()
+    assert calls["text"].startswith("First factual paragraph.")
+    assert calls["kwargs"]["max_input_words"] == 1400
+    assert calls["kwargs"]["target_language"] == "Russian"

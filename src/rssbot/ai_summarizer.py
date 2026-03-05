@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import Settings
+from .web_summarize import WebSummarizationError, fetch_webpage_content
 from .youtube_summarize import SummarizationError, summarize_text, summarize_text_with_openai
 from .youtube_transcribe import TranscriptError, TranscriptSegment, extract_video_id, fetch_transcript
 
@@ -142,6 +143,68 @@ def _summarize_sync(
     return video_id, languages, segments, summary
 
 
+def _looks_like_youtube_source(source: str) -> bool:
+    try:
+        extract_video_id(source)
+        return True
+    except ValueError:
+        return False
+
+
+def _web_openai_input_word_budget(settings: Settings) -> int:
+    common_budget = max(0, int(settings.AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS))
+    if common_budget:
+        return common_budget
+    web_budget = max(220, int(getattr(settings, "AI_SUMMARIZER_WEB_OPENAI_MAX_INPUT_WORDS", 1400)))
+    return web_budget
+
+
+def _summarize_web_sync(
+    settings: Settings,
+    *,
+    page_url: str,
+    custom_prompt: Optional[str],
+) -> tuple[str, str, str, str]:
+    mode = (settings.AI_SUMMARIZER_MODE or "openai").strip().lower()
+    if mode not in {"openai", "extractive"}:
+        raise AiSummarizerError("AI_SUMMARIZER_MODE must be 'openai' or 'extractive'.")
+
+    max_sentences = max(1, int(settings.AI_SUMMARIZER_MAX_SENTENCES))
+    target_language = _infer_instruction_language(custom_prompt)
+    fetch_timeout = max(3, int(getattr(settings, "AI_SUMMARIZER_WEB_FETCH_TIMEOUT_SEC", 15)))
+    fetch_max_bytes = max(
+        200_000,
+        int(getattr(settings, "AI_SUMMARIZER_WEB_MAX_RESPONSE_BYTES", 2_000_000)),
+    )
+    fetch_max_words = max(
+        320,
+        int(getattr(settings, "AI_SUMMARIZER_WEB_MAX_EXTRACTED_WORDS", 4500)),
+    )
+
+    page = fetch_webpage_content(
+        page_url,
+        timeout_sec=fetch_timeout,
+        max_bytes=fetch_max_bytes,
+        max_words=fetch_max_words,
+    )
+    source_text = page.cleaned_text
+
+    if mode == "openai":
+        summary = summarize_text_with_openai(
+            source_text,
+            max_sentences=max_sentences,
+            model=settings.AI_SUMMARIZER_OPENAI_MODEL,
+            custom_prompt=custom_prompt,
+            max_input_words=_web_openai_input_word_budget(settings),
+            api_key=getattr(settings, "OPENAI_API_KEY", None),
+            target_language=target_language,
+        )
+    else:
+        summary = summarize_text(source_text, max_sentences=max_sentences)
+
+    return page.source_url, page.title, source_text, summary
+
+
 async def summarize_video(
     settings: Settings,
     *,
@@ -149,55 +212,87 @@ async def summarize_video(
     video_url: str,
     custom_prompt: Optional[str],
 ) -> AiSummaryResult:
-    """Summarize YouTube video using internal modules (no external project dependency)."""
+    """Summarize YouTube video or arbitrary webpage URL."""
     output_dir = settings.AI_SUMMARIZER_OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
     prefix = f"tg_{chat_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     timeout = max(10, int(settings.AI_SUMMARIZER_TIMEOUT_SEC))
+    is_youtube_source = _looks_like_youtube_source(video_url)
 
     try:
-        video_id, languages, segments, summary = await asyncio.wait_for(
-            asyncio.to_thread(
-                _summarize_sync,
-                settings,
-                video_url=video_url,
-                custom_prompt=custom_prompt,
-            ),
-            timeout=timeout,
-        )
+        if is_youtube_source:
+            video_id, languages, segments, summary = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _summarize_sync,
+                    settings,
+                    video_url=video_url,
+                    custom_prompt=custom_prompt,
+                ),
+                timeout=timeout,
+            )
+        else:
+            source_url, source_title, source_text, summary = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _summarize_web_sync,
+                    settings,
+                    page_url=video_url,
+                    custom_prompt=custom_prompt,
+                ),
+                timeout=timeout,
+            )
     except asyncio.TimeoutError as exc:
         raise AiSummarizerError(f"Таймаут суммаризации ({timeout} сек).") from exc
     except ValueError as exc:
         raise AiSummarizerError(str(exc)) from exc
     except TranscriptError as exc:
         raise AiSummarizerError(str(exc)) from exc
+    except WebSummarizationError as exc:
+        raise AiSummarizerError(str(exc)) from exc
     except SummarizationError as exc:
         raise AiSummarizerError(str(exc)) from exc
 
-    timestamped_transcript = "\n".join(
-        f"[{_format_timestamp(segment.start)}] {segment.text}" for segment in segments
-    )
-
     summary_path = output_dir / f"{prefix}_summary.txt"
-    transcript_path = output_dir / f"{prefix}_transcript.txt"
+    source_text_path = output_dir / (
+        f"{prefix}_{'transcript' if is_youtube_source else 'source'}.txt"
+    )
     json_path = output_dir / f"{prefix}_result.json"
 
-    result_obj = {
-        "video_id": video_id,
-        "source_url": video_url,
-        "languages": languages,
-        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "segments": [segment.to_dict() for segment in segments],
-        "summary": summary,
-        "output_files": {
-            "transcript": str(transcript_path.resolve()),
-            "summary": str(summary_path.resolve()),
-        },
-    }
+    result_obj: dict[str, object]
+    source_text_for_file: str
+    if is_youtube_source:
+        source_text_for_file = "\n".join(
+            f"[{_format_timestamp(segment.start)}] {segment.text}" for segment in segments
+        )
+        result_obj = {
+            "source_type": "youtube",
+            "video_id": video_id,
+            "source_url": video_url,
+            "languages": languages,
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "segments": [segment.to_dict() for segment in segments],
+            "summary": summary,
+            "output_files": {
+                "transcript": str(source_text_path.resolve()),
+                "summary": str(summary_path.resolve()),
+            },
+        }
+    else:
+        source_text_for_file = source_text
+        result_obj = {
+            "source_type": "web_page",
+            "source_url": source_url,
+            "source_title": source_title,
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "summary": summary,
+            "output_files": {
+                "source_text": str(source_text_path.resolve()),
+                "summary": str(summary_path.resolve()),
+            },
+        }
 
     try:
-        transcript_path.write_text(timestamped_transcript + "\n", encoding="utf-8")
+        source_text_path.write_text(source_text_for_file + "\n", encoding="utf-8")
         summary_path.write_text(summary + "\n", encoding="utf-8")
         json_path.write_text(
             json.dumps(result_obj, ensure_ascii=False, indent=2) + "\n",
@@ -212,7 +307,7 @@ async def summarize_video(
     return AiSummaryResult(
         summary_text=summary,
         summary_path=summary_path,
-        transcript_path=transcript_path,
+        transcript_path=source_text_path,
     )
 
 
