@@ -6,6 +6,7 @@ import pytest
 
 from rssbot import ai_summarizer
 from rssbot.ai_summarizer import AiSummarizerError, parse_ai_request_text, split_message_chunks
+from rssbot.youtube_context import VideoContext
 from rssbot.web_summarize import WebPageContent
 
 
@@ -249,3 +250,102 @@ def test_summarize_video_persists_files_only_when_enabled(monkeypatch, tmp_path)
 
     assert result.summary_path is not None and result.summary_path.exists()
     assert result.transcript_path is not None and result.transcript_path.exists()
+
+
+def test_summarize_video_fallbacks_to_description_and_comments(monkeypatch, tmp_path):
+    settings = _settings(tmp_path, AI_SUMMARIZER_MODE="openai")
+    calls = {}
+
+    monkeypatch.setattr(ai_summarizer, "extract_video_id", lambda _: "dQw4w9WgXcQ")
+
+    def fake_fetch_transcript(**_kwargs):
+        raise ai_summarizer.TranscriptError("No transcripts were found for this video")
+
+    monkeypatch.setattr(ai_summarizer, "fetch_transcript", fake_fetch_transcript)
+    monkeypatch.setattr(
+        ai_summarizer,
+        "fetch_video_context",
+        lambda **_kwargs: VideoContext(
+            video_id="dQw4w9WgXcQ",
+            title="Video title",
+            short_description="Short description text",
+            comments=["first comment", "second comment"],
+            watch_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        ),
+    )
+
+    def fake_openai_summary(text, **kwargs):
+        calls["text"] = text
+        calls["kwargs"] = kwargs
+        return "- Fallback bullet"
+
+    monkeypatch.setattr(ai_summarizer, "summarize_text_with_openai", fake_openai_summary)
+
+    result = asyncio.run(
+        ai_summarizer.summarize_video(
+            settings,
+            chat_id=77,
+            video_url="https://youtu.be/dQw4w9WgXcQ",
+            custom_prompt="выдели риски",
+        )
+    )
+
+    assert result.summary_text == "- Fallback bullet"
+    assert result.summary_basis == "metadata_comments"
+    assert result.video_id == "dQw4w9WgXcQ"
+    assert "Short video description:" in calls["text"]
+    assert "Top viewer comments:" in calls["text"]
+    assert calls["kwargs"]["max_input_words"] == 900
+
+
+def test_summarize_video_force_whisper(monkeypatch, tmp_path):
+    settings = _settings(tmp_path, AI_SUMMARIZER_MODE="openai")
+    calls = {}
+
+    monkeypatch.setattr(ai_summarizer, "extract_video_id", lambda _: "dQw4w9WgXcQ")
+    monkeypatch.setattr(
+        ai_summarizer,
+        "transcribe_video_with_whisper",
+        lambda *_args, **_kwargs: "full whisper transcript text",
+    )
+
+    def fake_openai_summary(text, **kwargs):
+        calls["text"] = text
+        calls["kwargs"] = kwargs
+        return "- Whisper bullet"
+
+    monkeypatch.setattr(ai_summarizer, "summarize_text_with_openai", fake_openai_summary)
+    monkeypatch.setattr(
+        ai_summarizer,
+        "fetch_transcript",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("captions path should not be used")),
+    )
+
+    result = asyncio.run(
+        ai_summarizer.summarize_video(
+            settings,
+            chat_id=88,
+            video_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            custom_prompt=None,
+            force_whisper=True,
+        )
+    )
+
+    assert result.summary_text == "- Whisper bullet"
+    assert result.summary_basis == "whisper"
+    assert result.video_id == "dQw4w9WgXcQ"
+    assert calls["text"] == "full whisper transcript text"
+
+
+def test_summarize_video_rejects_force_whisper_for_web_page(tmp_path):
+    settings = _settings(tmp_path)
+    with pytest.raises(AiSummarizerError):
+        asyncio.run(
+            ai_summarizer.summarize_video(
+                settings,
+                chat_id=9,
+                video_url="https://example.com/article",
+                custom_prompt=None,
+                force_whisper=True,
+            )
+        )

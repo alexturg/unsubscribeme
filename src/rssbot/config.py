@@ -78,6 +78,46 @@ class Settings(BaseSettings):
         default=4500,
         description="Max words kept after HTML cleanup before summarization",
     )
+    AI_SUMMARIZER_YOUTUBE_CONTEXT_FETCH_TIMEOUT_SEC: int = Field(
+        default=15,
+        description="Timeout for loading YouTube watch page in subtitles-missing fallback mode",
+    )
+    AI_SUMMARIZER_YOUTUBE_CONTEXT_MAX_HTML_BYTES: int = Field(
+        default=2_500_000,
+        description="Max HTML bytes to download from YouTube page for fallback context extraction",
+    )
+    AI_SUMMARIZER_YOUTUBE_CONTEXT_MAX_DESCRIPTION_WORDS: int = Field(
+        default=220,
+        description="Max words kept from YouTube short description for fallback summarization",
+    )
+    AI_SUMMARIZER_YOUTUBE_CONTEXT_MAX_COMMENTS: int = Field(
+        default=12,
+        description="Max number of top comments kept for YouTube fallback summarization",
+    )
+    AI_SUMMARIZER_YOUTUBE_CONTEXT_MAX_COMMENT_WORDS: int = Field(
+        default=36,
+        description="Per-comment max words in YouTube fallback summarization input",
+    )
+    AI_SUMMARIZER_YOUTUBE_CONTEXT_OPENAI_MAX_INPUT_WORDS: int = Field(
+        default=900,
+        description="OpenAI max input words budget for YouTube description/comments fallback",
+    )
+    AI_SUMMARIZER_WHISPER_MODEL: str = Field(
+        default="whisper-1",
+        description="OpenAI transcription model used by Whisper fallback flow",
+    )
+    AI_SUMMARIZER_WHISPER_MAX_AUDIO_MB: int = Field(
+        default=24,
+        description="Max audio file size for Whisper transcription",
+    )
+    AI_SUMMARIZER_WHISPER_DOWNLOAD_TIMEOUT_SEC: int = Field(
+        default=240,
+        description="Timeout for yt-dlp audio download in Whisper flow",
+    )
+    AI_SUMMARIZER_WHISPER_YTDLP_BINARY: str = Field(
+        default="yt-dlp",
+        description="Path or binary name of yt-dlp used to fetch audio for Whisper",
+    )
     AI_SUMMARIZER_TIMEOUT_SEC: int = Field(default=600)
     AI_SUMMARIZER_OUTPUT_DIR: Path = Field(
         default=Path("data/ai_summaries"),

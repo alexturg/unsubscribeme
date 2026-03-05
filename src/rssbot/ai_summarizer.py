@@ -11,8 +11,16 @@ from typing import Optional
 
 from .config import Settings
 from .web_summarize import WebSummarizationError, fetch_webpage_content
+from .youtube_context import VideoContext, VideoContextError, fetch_video_context
 from .youtube_summarize import SummarizationError, summarize_text, summarize_text_with_openai
-from .youtube_transcribe import TranscriptError, TranscriptSegment, extract_video_id, fetch_transcript
+from .youtube_transcribe import (
+    TranscriptError,
+    TranscriptSegment,
+    WhisperTranscriptionError,
+    extract_video_id,
+    fetch_transcript,
+    transcribe_video_with_whisper,
+)
 
 
 class AiSummarizerError(RuntimeError):
@@ -30,6 +38,33 @@ class AiSummaryResult:
     summary_text: str
     summary_path: Optional[Path]
     transcript_path: Optional[Path]
+    source_type: str = "youtube"
+    summary_basis: str = "captions"
+    video_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _YouTubeSummarySyncResult:
+    video_id: str
+    languages: list[str]
+    segments: list[TranscriptSegment]
+    source_text: str
+    summary: str
+    summary_basis: str
+
+
+TRANSCRIPT_MISSING_MARKERS = (
+    "no transcripts were found",
+    "transcriptsdisabled",
+    "transcript is disabled",
+    "subtitles are disabled",
+    "requested transcript is not available",
+    "no transcript",
+)
+YOUTUBE_CONTEXT_SUMMARY_INSTRUCTION = (
+    "Important: source text contains only video short description and viewer comments, "
+    "not a full transcript. Be explicit when information is uncertain."
+)
 
 
 def parse_ai_request_text(text: str) -> AiSummaryRequest:
@@ -105,31 +140,29 @@ def _format_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
-def _summarize_sync(
-    settings: Settings,
-    *,
-    video_url: str,
-    custom_prompt: Optional[str],
-) -> tuple[str, list[str], list[TranscriptSegment], str]:
+def _require_supported_mode(settings: Settings) -> str:
     mode = (settings.AI_SUMMARIZER_MODE or "openai").strip().lower()
     if mode not in {"openai", "extractive"}:
         raise AiSummarizerError("AI_SUMMARIZER_MODE must be 'openai' or 'extractive'.")
+    return mode
 
-    languages = _parse_languages(settings.AI_SUMMARIZER_LANGUAGES)
-    if not languages:
-        raise AiSummarizerError("AI_SUMMARIZER_LANGUAGES must include at least one language code.")
 
+def _summarize_source_text_by_mode(
+    settings: Settings,
+    *,
+    source_text: str,
+    custom_prompt: Optional[str],
+    target_language: str,
+    max_input_words_override: Optional[int] = None,
+) -> str:
+    mode = _require_supported_mode(settings)
     max_sentences = max(1, int(settings.AI_SUMMARIZER_MAX_SENTENCES))
-    max_input_words = max(0, int(settings.AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS))
-    target_language = _infer_instruction_language(custom_prompt)
-
-    video_id = extract_video_id(video_url)
-    segments = fetch_transcript(video_id=video_id, languages=languages)
-    plain_transcript = " ".join(segment.text for segment in segments)
-
     if mode == "openai":
-        summary = summarize_text_with_openai(
-            plain_transcript,
+        max_input_words = max(0, int(settings.AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS))
+        if max_input_words_override is not None:
+            max_input_words = max(220, int(max_input_words_override))
+        return summarize_text_with_openai(
+            source_text,
             max_sentences=max_sentences,
             model=settings.AI_SUMMARIZER_OPENAI_MODEL,
             custom_prompt=custom_prompt,
@@ -137,10 +170,179 @@ def _summarize_sync(
             api_key=getattr(settings, "OPENAI_API_KEY", None),
             target_language=target_language,
         )
-    else:
-        summary = summarize_text(plain_transcript, max_sentences=max_sentences)
+    return summarize_text(source_text, max_sentences=max_sentences)
 
-    return video_id, languages, segments, summary
+
+def _transcript_error_means_missing_subtitles(exc: TranscriptError) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in TRANSCRIPT_MISSING_MARKERS)
+
+
+def _youtube_context_openai_input_word_budget(settings: Settings) -> int:
+    context_budget = max(
+        260,
+        int(getattr(settings, "AI_SUMMARIZER_YOUTUBE_CONTEXT_OPENAI_MAX_INPUT_WORDS", 900)),
+    )
+    common_budget = max(0, int(settings.AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS))
+    if common_budget:
+        return min(common_budget, context_budget)
+    return context_budget
+
+
+def _build_youtube_context_source(context: VideoContext) -> str:
+    lines: list[str] = []
+    if context.title:
+        lines.append(f"Video title: {context.title}")
+    if context.short_description:
+        lines.append("Short video description:")
+        lines.append(context.short_description)
+    if context.comments:
+        lines.append("Top viewer comments:")
+        lines.extend(f"- {comment}" for comment in context.comments)
+    return "\n".join(lines).strip()
+
+
+def _summarize_youtube_context_fallback(
+    settings: Settings,
+    *,
+    video_id: str,
+    custom_prompt: Optional[str],
+    target_language: str,
+) -> _YouTubeSummarySyncResult:
+    context = fetch_video_context(
+        video_id=video_id,
+        timeout_sec=max(3, int(getattr(settings, "AI_SUMMARIZER_YOUTUBE_CONTEXT_FETCH_TIMEOUT_SEC", 15))),
+        max_html_bytes=max(
+            250_000,
+            int(getattr(settings, "AI_SUMMARIZER_YOUTUBE_CONTEXT_MAX_HTML_BYTES", 2_500_000)),
+        ),
+        max_description_words=max(
+            80,
+            int(getattr(settings, "AI_SUMMARIZER_YOUTUBE_CONTEXT_MAX_DESCRIPTION_WORDS", 220)),
+        ),
+        max_comments=max(0, int(getattr(settings, "AI_SUMMARIZER_YOUTUBE_CONTEXT_MAX_COMMENTS", 12))),
+        max_comment_words=max(
+            6,
+            int(getattr(settings, "AI_SUMMARIZER_YOUTUBE_CONTEXT_MAX_COMMENT_WORDS", 36)),
+        ),
+    )
+    context_text = _build_youtube_context_source(context)
+    if not context_text:
+        raise AiSummarizerError("Fallback-контент YouTube пустой: нет описания и комментариев.")
+
+    mode = _require_supported_mode(settings)
+    fallback_prompt = (
+        YOUTUBE_CONTEXT_SUMMARY_INSTRUCTION
+        if not custom_prompt
+        else f"{custom_prompt}\n\n{YOUTUBE_CONTEXT_SUMMARY_INSTRUCTION}"
+    )
+    if mode == "openai":
+        summary = _summarize_source_text_by_mode(
+            settings,
+            source_text=context_text,
+            custom_prompt=fallback_prompt,
+            target_language=target_language,
+            max_input_words_override=_youtube_context_openai_input_word_budget(settings),
+        )
+    else:
+        summary = _summarize_source_text_by_mode(
+            settings,
+            source_text=context_text,
+            custom_prompt=None,
+            target_language=target_language,
+        )
+
+    return _YouTubeSummarySyncResult(
+        video_id=video_id,
+        languages=[],
+        segments=[],
+        source_text=context_text,
+        summary=summary,
+        summary_basis="metadata_comments",
+    )
+
+
+def _summarize_sync(
+    settings: Settings,
+    *,
+    video_url: str,
+    custom_prompt: Optional[str],
+) -> _YouTubeSummarySyncResult:
+    _require_supported_mode(settings)
+    languages = _parse_languages(settings.AI_SUMMARIZER_LANGUAGES)
+    if not languages:
+        raise AiSummarizerError("AI_SUMMARIZER_LANGUAGES must include at least one language code.")
+
+    target_language = _infer_instruction_language(custom_prompt)
+    video_id = extract_video_id(video_url)
+
+    try:
+        segments = fetch_transcript(video_id=video_id, languages=languages)
+    except TranscriptError as exc:
+        if not _transcript_error_means_missing_subtitles(exc):
+            raise
+        return _summarize_youtube_context_fallback(
+            settings,
+            video_id=video_id,
+            custom_prompt=custom_prompt,
+            target_language=target_language,
+        )
+
+    plain_transcript = " ".join(segment.text for segment in segments)
+    summary = _summarize_source_text_by_mode(
+        settings,
+        source_text=plain_transcript,
+        custom_prompt=custom_prompt,
+        target_language=target_language,
+    )
+    return _YouTubeSummarySyncResult(
+        video_id=video_id,
+        languages=languages,
+        segments=segments,
+        source_text=plain_transcript,
+        summary=summary,
+        summary_basis="captions",
+    )
+
+
+def _summarize_sync_with_whisper(
+    settings: Settings,
+    *,
+    video_url: str,
+    custom_prompt: Optional[str],
+) -> _YouTubeSummarySyncResult:
+    _require_supported_mode(settings)
+    target_language = _infer_instruction_language(custom_prompt)
+    video_id = extract_video_id(video_url)
+
+    transcript_text = transcribe_video_with_whisper(
+        video_id,
+        model=str(getattr(settings, "AI_SUMMARIZER_WHISPER_MODEL", "whisper-1")),
+        api_key=getattr(settings, "OPENAI_API_KEY", None),
+        max_audio_megabytes=max(
+            8,
+            int(getattr(settings, "AI_SUMMARIZER_WHISPER_MAX_AUDIO_MB", 24)),
+        ),
+        download_timeout_sec=max(
+            20,
+            int(getattr(settings, "AI_SUMMARIZER_WHISPER_DOWNLOAD_TIMEOUT_SEC", 240)),
+        ),
+        yt_dlp_binary=str(getattr(settings, "AI_SUMMARIZER_WHISPER_YTDLP_BINARY", "yt-dlp")),
+    )
+    summary = _summarize_source_text_by_mode(
+        settings,
+        source_text=transcript_text,
+        custom_prompt=custom_prompt,
+        target_language=target_language,
+    )
+    return _YouTubeSummarySyncResult(
+        video_id=video_id,
+        languages=[],
+        segments=[],
+        source_text=transcript_text,
+        summary=summary,
+        summary_basis="whisper",
+    )
 
 
 def _looks_like_youtube_source(source: str) -> bool:
@@ -165,11 +367,7 @@ def _summarize_web_sync(
     page_url: str,
     custom_prompt: Optional[str],
 ) -> tuple[str, str, str, str]:
-    mode = (settings.AI_SUMMARIZER_MODE or "openai").strip().lower()
-    if mode not in {"openai", "extractive"}:
-        raise AiSummarizerError("AI_SUMMARIZER_MODE must be 'openai' or 'extractive'.")
-
-    max_sentences = max(1, int(settings.AI_SUMMARIZER_MAX_SENTENCES))
+    mode = _require_supported_mode(settings)
     target_language = _infer_instruction_language(custom_prompt)
     fetch_timeout = max(3, int(getattr(settings, "AI_SUMMARIZER_WEB_FETCH_TIMEOUT_SEC", 15)))
     fetch_max_bytes = max(
@@ -190,17 +388,20 @@ def _summarize_web_sync(
     source_text = page.cleaned_text
 
     if mode == "openai":
-        summary = summarize_text_with_openai(
-            source_text,
-            max_sentences=max_sentences,
-            model=settings.AI_SUMMARIZER_OPENAI_MODEL,
+        summary = _summarize_source_text_by_mode(
+            settings,
+            source_text=source_text,
             custom_prompt=custom_prompt,
-            max_input_words=_web_openai_input_word_budget(settings),
-            api_key=getattr(settings, "OPENAI_API_KEY", None),
             target_language=target_language,
+            max_input_words_override=_web_openai_input_word_budget(settings),
         )
     else:
-        summary = summarize_text(source_text, max_sentences=max_sentences)
+        summary = _summarize_source_text_by_mode(
+            settings,
+            source_text=source_text,
+            custom_prompt=None,
+            target_language=target_language,
+        )
 
     return page.source_url, page.title, source_text, summary
 
@@ -211,23 +412,38 @@ async def summarize_video(
     chat_id: int,
     video_url: str,
     custom_prompt: Optional[str],
+    force_whisper: bool = False,
 ) -> AiSummaryResult:
     """Summarize YouTube video or arbitrary webpage URL."""
     timeout = max(10, int(settings.AI_SUMMARIZER_TIMEOUT_SEC))
     is_youtube_source = _looks_like_youtube_source(video_url)
 
+    youtube_result: Optional[_YouTubeSummarySyncResult] = None
+    source_url = ""
+    source_title = ""
+    source_text = ""
+    summary = ""
+    summary_basis = "web_page"
+    video_id: Optional[str] = None
+
     try:
         if is_youtube_source:
-            video_id, languages, segments, summary = await asyncio.wait_for(
+            sync_fn = _summarize_sync_with_whisper if force_whisper else _summarize_sync
+            youtube_result = await asyncio.wait_for(
                 asyncio.to_thread(
-                    _summarize_sync,
+                    sync_fn,
                     settings,
                     video_url=video_url,
                     custom_prompt=custom_prompt,
                 ),
                 timeout=timeout,
             )
+            summary = youtube_result.summary
+            summary_basis = youtube_result.summary_basis
+            video_id = youtube_result.video_id
         else:
+            if force_whisper:
+                raise AiSummarizerError("Whisper-доступен только для YouTube-ссылок.")
             source_url, source_title, source_text, summary = await asyncio.wait_for(
                 asyncio.to_thread(
                     _summarize_web_sync,
@@ -242,6 +458,10 @@ async def summarize_video(
     except ValueError as exc:
         raise AiSummarizerError(str(exc)) from exc
     except TranscriptError as exc:
+        raise AiSummarizerError(str(exc)) from exc
+    except VideoContextError as exc:
+        raise AiSummarizerError(str(exc)) from exc
+    except WhisperTranscriptionError as exc:
         raise AiSummarizerError(str(exc)) from exc
     except WebSummarizationError as exc:
         raise AiSummarizerError(str(exc)) from exc
@@ -260,29 +480,43 @@ async def summarize_video(
         prefix = f"tg_{chat_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
 
         summary_path = output_dir / f"{prefix}_summary.txt"
-        source_text_path = output_dir / (
-            f"{prefix}_{'transcript' if is_youtube_source else 'source'}.txt"
+        source_suffix = (
+            "transcript"
+            if is_youtube_source and summary_basis in {"captions", "whisper"}
+            else "source"
         )
+        source_text_path = output_dir / f"{prefix}_{source_suffix}.txt"
         json_path = output_dir / f"{prefix}_result.json"
 
         result_obj: dict[str, object]
         source_text_for_file: str
-        if is_youtube_source:
-            source_text_for_file = "\n".join(
-                f"[{_format_timestamp(segment.start)}] {segment.text}" for segment in segments
-            )
+        if is_youtube_source and youtube_result is not None:
+            if youtube_result.summary_basis == "captions" and youtube_result.segments:
+                source_text_for_file = "\n".join(
+                    f"[{_format_timestamp(segment.start)}] {segment.text}"
+                    for segment in youtube_result.segments
+                )
+            else:
+                source_text_for_file = youtube_result.source_text
+
+            output_files: dict[str, str] = {
+                "summary": str(summary_path.resolve()),
+            }
+            if source_suffix == "transcript":
+                output_files["transcript"] = str(source_text_path.resolve())
+            else:
+                output_files["source_text"] = str(source_text_path.resolve())
+
             result_obj = {
                 "source_type": "youtube",
-                "video_id": video_id,
+                "video_id": youtube_result.video_id,
                 "source_url": video_url,
-                "languages": languages,
+                "summary_basis": youtube_result.summary_basis,
+                "languages": youtube_result.languages,
                 "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-                "segments": [segment.to_dict() for segment in segments],
+                "segments": [segment.to_dict() for segment in youtube_result.segments],
                 "summary": summary,
-                "output_files": {
-                    "transcript": str(source_text_path.resolve()),
-                    "summary": str(summary_path.resolve()),
-                },
+                "output_files": output_files,
             }
         else:
             source_text_for_file = source_text
@@ -312,6 +546,9 @@ async def summarize_video(
         summary_text=summary,
         summary_path=summary_path,
         transcript_path=source_text_path,
+        source_type="youtube" if is_youtube_source else "web_page",
+        summary_basis=summary_basis,
+        video_id=video_id,
     )
 
 
