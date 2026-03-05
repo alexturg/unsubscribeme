@@ -15,6 +15,8 @@ Quick start:
 Core commands:
 - `/start` — register.
 - `/ai <youtube_url_or_video_id_or_page_url> [дополнительный фокус]` — сделать AI-суммаризацию YouTube-видео или обычной веб-страницы.
+- `/audio <youtube_url_or_video_id>` — выгрузить аудио YouTube-видео файлом.
+- `/transcribe <youtube_url_or_video_id>` — получить транскрипт в `.txt`; если субтитров нет, бот предложит подтверждение Whisper кнопкой.
 - `/addfeed <url> [mode=immediate|digest|on_demand] [label=...] [interval=10] [time=HH:MM]`
 - `/addeventsource <url> [type=json|ics] [label=...] [interval=1]` — add events source (start notifications)
 - `/addics <url> [label=...] [interval=1]` — add ICS calendar events source (start notifications)
@@ -37,6 +39,7 @@ AI summary (`/ai`) setup:
 - If YouTube subtitles are unavailable, `/ai` now returns a provisional summary based on short description + top comments and shows a button to run full Whisper transcription.
 - Whisper flow requirements: `yt-dlp` binary on server (`AI_SUMMARIZER_WHISPER_YTDLP_BINARY`) and valid `OPENAI_API_KEY`.
 - Whisper flow now normalizes audio and auto-splits long files into parts to stay under OpenAI upload limits.
+- `/transcribe` shows video duration/size info before Whisper confirmation when subtitles are missing.
 - Fallback tuning: `AI_SUMMARIZER_YOUTUBE_CONTEXT_*` settings let you cap extracted HTML/comments and OpenAI input size to save tokens.
 - Whisper tuning: `AI_SUMMARIZER_WHISPER_MODEL`, `AI_SUMMARIZER_WHISPER_MAX_AUDIO_MB`, `AI_SUMMARIZER_WHISPER_DOWNLOAD_TIMEOUT_SEC`.
 - Security note: web-page summarization blocks private/local addresses and accepts only `http/https`.

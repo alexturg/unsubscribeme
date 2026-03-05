@@ -118,6 +118,10 @@ class Settings(BaseSettings):
         default="yt-dlp",
         description="Path or binary name of yt-dlp used to fetch audio for Whisper",
     )
+    AI_AUDIO_EXPORT_MAX_BYTES: int = Field(
+        default=48 * 1024 * 1024,
+        description="Max audio file size for /audio command Telegram upload",
+    )
     AI_SUMMARIZER_TIMEOUT_SEC: int = Field(default=600)
     AI_SUMMARIZER_OUTPUT_DIR: Path = Field(
         default=Path("data/ai_summaries"),
