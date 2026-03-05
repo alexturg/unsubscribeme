@@ -2,11 +2,13 @@ from __future__ import annotations
 import asyncio
 import csv
 import hashlib
+from html import escape as html_escape
 import json
 import logging
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 from aiogram import Router
@@ -380,6 +382,47 @@ def _dedupe_user_feeds(user_id: int) -> int:
         except Exception:
             pass
     return len(removed_ids)
+
+
+def _resolve_feed_display_url(feed_url: str) -> Optional[str]:
+    """Return a public page URL for a feed if it is a supported YouTube feed."""
+    parsed = urlparse((feed_url or "").strip())
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    if "youtube.com" not in host or not path.endswith("/feeds/videos.xml"):
+        return None
+
+    qs = parse_qs(parsed.query or "")
+    channel_id = (qs.get("channel_id") or [""])[0].strip()
+    if channel_id:
+        return f"https://www.youtube.com/channel/{channel_id}"
+    playlist_id = (qs.get("playlist_id") or [""])[0].strip()
+    if playlist_id:
+        return f"https://www.youtube.com/playlist?list={playlist_id}"
+    return None
+
+
+def _format_feed_list_line(feed: Feed) -> str:
+    """Format one line for /list with a clickable title when possible."""
+    status = "✓" if feed.enabled else "✗"
+    display_name = feed.label or feed.name or feed.url[:50]
+    safe_display_name = html_escape(display_name, quote=False)
+    display_url = _resolve_feed_display_url(feed.url)
+
+    if display_url:
+        safe_url = html_escape(display_url, quote=True)
+        title = f"<a href=\"{safe_url}\">{safe_display_name}</a>"
+    else:
+        title = safe_display_name
+
+    safe_mode = html_escape(feed.mode, quote=False)
+    safe_type = html_escape(feed.type or "unknown", quote=False)
+    time_part = (
+        f" в {html_escape(feed.digest_time_local, quote=False)}"
+        if feed.digest_time_local
+        else ""
+    )
+    return f"{status} {feed.id}: {title} — {safe_mode}{time_part} [{safe_type}]"
 
 
 async def _extract_youtube_channel_id(url: str) -> Optional[str]:
@@ -885,13 +928,7 @@ async def cmd_list(message: Message) -> None:
             return
         lines = ["Ваши ленты:"]
         for f in feeds:
-            status = "✓" if f.enabled else "✗"
-            display_name = f.label or f.name or f.url[:50]
-            time_part = f" в {f.digest_time_local}" if f.digest_time_local else ""
-            type_part = f" [{f.type or 'unknown'}]"
-            lines.append(
-                f"{status} {f.id}: {display_name} — {f.mode}{time_part}{type_part}"
-            )
+            lines.append(_format_feed_list_line(f))
         await message.answer("\n".join(lines))
 
 
