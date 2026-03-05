@@ -14,6 +14,14 @@ def test_normalize_web_url_adds_https_and_removes_fragment():
     assert normalize_web_url("example.com/path#section") == "https://example.com/path"
 
 
+def test_normalize_web_url_encodes_unicode_path():
+    url = "https://ru.wikipedia.org/wiki/Драммонд,_Маргарет"
+    normalized = normalize_web_url(url)
+    assert normalized.startswith("https://ru.wikipedia.org/wiki/")
+    assert "Драммонд" not in normalized
+    assert "%D0%94%D1%80%D0%B0%D0%BC%D0%BC%D0%BE%D0%BD%D0%B4" in normalized
+
+
 def test_validate_web_url_for_fetch_blocks_loopback_ip():
     with pytest.raises(WebSummarizationError):
         validate_web_url_for_fetch("http://127.0.0.1/private")

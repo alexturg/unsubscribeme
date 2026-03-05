@@ -7,7 +7,7 @@ import re
 import socket
 import urllib.error
 import urllib.request
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 
 SPACE_RE = re.compile(r"\s+")
@@ -255,8 +255,18 @@ def normalize_web_url(raw_url: str) -> str:
     if port is not None and not (1 <= port <= 65535):
         raise WebSummarizationError("Порт URL вне допустимого диапазона.")
 
-    cleaned = parsed._replace(fragment="")
-    return urlunsplit(cleaned)
+    try:
+        ascii_host = parsed.hostname.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise WebSummarizationError("Некорректный host в URL.") from exc
+
+    if ":" in ascii_host and not ascii_host.startswith("["):
+        ascii_host = f"[{ascii_host}]"
+
+    netloc = ascii_host if port is None else f"{ascii_host}:{port}"
+    path = quote(parsed.path or "", safe="/%:@-._~!$&'()*+,;=")
+    query = quote(parsed.query or "", safe="=&%:@-._~!$'()*+,;/?")
+    return urlunsplit((scheme, netloc, path, query, ""))
 
 
 def validate_web_url_for_fetch(raw_url: str) -> str:
