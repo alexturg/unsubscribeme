@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     )
     AI_SUMMARIZER_MAX_SENTENCES: int = Field(default=7)
     AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS: int = Field(default=0)
+    AI_SUMMARIZER_SAVE_OUTPUT_FILES: bool = Field(
+        default=False,
+        description="Save summary/source files to disk; disabled by default to avoid local clutter",
+    )
     AI_SUMMARIZER_WEB_OPENAI_MAX_INPUT_WORDS: int = Field(
         default=1400,
         description="Fallback max input words for web-page summarization in OpenAI mode",

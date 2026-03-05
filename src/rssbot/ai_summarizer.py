@@ -28,7 +28,7 @@ class AiSummaryRequest:
 @dataclass(frozen=True)
 class AiSummaryResult:
     summary_text: str
-    summary_path: Path
+    summary_path: Optional[Path]
     transcript_path: Optional[Path]
 
 
@@ -86,14 +86,14 @@ def _parse_languages(value: str) -> list[str]:
     return [item.strip() for item in (value or "").split(",") if item.strip()]
 
 
-def _infer_instruction_language(custom_prompt: Optional[str]) -> Optional[str]:
+def _infer_instruction_language(custom_prompt: Optional[str]) -> str:
     text = (custom_prompt or "").strip().lower()
     if not text:
-        return None
+        return "Russian"
     cyr = sum(1 for ch in text if ("а" <= ch <= "я") or ch == "ё")
     lat = sum(1 for ch in text if "a" <= ch <= "z")
     if cyr == 0 and lat == 0:
-        return None
+        return "Russian"
     return "Russian" if cyr >= lat else "English"
 
 
@@ -213,10 +213,6 @@ async def summarize_video(
     custom_prompt: Optional[str],
 ) -> AiSummaryResult:
     """Summarize YouTube video or arbitrary webpage URL."""
-    output_dir = settings.AI_SUMMARIZER_OUTPUT_DIR
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    prefix = f"tg_{chat_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     timeout = max(10, int(settings.AI_SUMMARIZER_TIMEOUT_SEC))
     is_youtube_source = _looks_like_youtube_source(video_url)
 
@@ -252,57 +248,65 @@ async def summarize_video(
     except SummarizationError as exc:
         raise AiSummarizerError(str(exc)) from exc
 
-    summary_path = output_dir / f"{prefix}_summary.txt"
-    source_text_path = output_dir / (
-        f"{prefix}_{'transcript' if is_youtube_source else 'source'}.txt"
-    )
-    json_path = output_dir / f"{prefix}_result.json"
-
-    result_obj: dict[str, object]
-    source_text_for_file: str
-    if is_youtube_source:
-        source_text_for_file = "\n".join(
-            f"[{_format_timestamp(segment.start)}] {segment.text}" for segment in segments
-        )
-        result_obj = {
-            "source_type": "youtube",
-            "video_id": video_id,
-            "source_url": video_url,
-            "languages": languages,
-            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-            "segments": [segment.to_dict() for segment in segments],
-            "summary": summary,
-            "output_files": {
-                "transcript": str(source_text_path.resolve()),
-                "summary": str(summary_path.resolve()),
-            },
-        }
-    else:
-        source_text_for_file = source_text
-        result_obj = {
-            "source_type": "web_page",
-            "source_url": source_url,
-            "source_title": source_title,
-            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-            "summary": summary,
-            "output_files": {
-                "source_text": str(source_text_path.resolve()),
-                "summary": str(summary_path.resolve()),
-            },
-        }
-
-    try:
-        source_text_path.write_text(source_text_for_file + "\n", encoding="utf-8")
-        summary_path.write_text(summary + "\n", encoding="utf-8")
-        json_path.write_text(
-            json.dumps(result_obj, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        raise AiSummarizerError(f"Не удалось сохранить результат суммаризации: {exc}") from exc
-
     if not summary.strip():
         raise AiSummarizerError("Суммаризатор вернул пустой текст summary.")
+
+    persist_outputs = bool(getattr(settings, "AI_SUMMARIZER_SAVE_OUTPUT_FILES", False))
+    summary_path: Optional[Path] = None
+    source_text_path: Optional[Path] = None
+    if persist_outputs:
+        output_dir = settings.AI_SUMMARIZER_OUTPUT_DIR
+        output_dir.mkdir(parents=True, exist_ok=True)
+        prefix = f"tg_{chat_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+
+        summary_path = output_dir / f"{prefix}_summary.txt"
+        source_text_path = output_dir / (
+            f"{prefix}_{'transcript' if is_youtube_source else 'source'}.txt"
+        )
+        json_path = output_dir / f"{prefix}_result.json"
+
+        result_obj: dict[str, object]
+        source_text_for_file: str
+        if is_youtube_source:
+            source_text_for_file = "\n".join(
+                f"[{_format_timestamp(segment.start)}] {segment.text}" for segment in segments
+            )
+            result_obj = {
+                "source_type": "youtube",
+                "video_id": video_id,
+                "source_url": video_url,
+                "languages": languages,
+                "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+                "segments": [segment.to_dict() for segment in segments],
+                "summary": summary,
+                "output_files": {
+                    "transcript": str(source_text_path.resolve()),
+                    "summary": str(summary_path.resolve()),
+                },
+            }
+        else:
+            source_text_for_file = source_text
+            result_obj = {
+                "source_type": "web_page",
+                "source_url": source_url,
+                "source_title": source_title,
+                "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+                "summary": summary,
+                "output_files": {
+                    "source_text": str(source_text_path.resolve()),
+                    "summary": str(summary_path.resolve()),
+                },
+            }
+
+        try:
+            source_text_path.write_text(source_text_for_file + "\n", encoding="utf-8")
+            summary_path.write_text(summary + "\n", encoding="utf-8")
+            json_path.write_text(
+                json.dumps(result_obj, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            raise AiSummarizerError(f"Не удалось сохранить результат суммаризации: {exc}") from exc
 
     return AiSummaryResult(
         summary_text=summary,

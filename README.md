@@ -30,6 +30,8 @@ Core commands:
 
 AI summary (`/ai`) setup:
 - Default mode is `openai`, set `OPENAI_API_KEY` in `.env`.
+- By default, `/ai` does not write summary artifacts to disk (reply-only mode in Telegram).
+- To enable file persistence, set `AI_SUMMARIZER_SAVE_OUTPUT_FILES=true`.
 - Optional tuning: `AI_SUMMARIZER_OPENAI_MODEL`, `AI_SUMMARIZER_LANGUAGES`, `AI_SUMMARIZER_MAX_SENTENCES`, `AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS`.
 - Web page mode tuning: `AI_SUMMARIZER_WEB_OPENAI_MAX_INPUT_WORDS`, `AI_SUMMARIZER_WEB_FETCH_TIMEOUT_SEC`, `AI_SUMMARIZER_WEB_MAX_RESPONSE_BYTES`, `AI_SUMMARIZER_WEB_MAX_EXTRACTED_WORDS`.
 - Security note: web-page summarization blocks private/local addresses and accepts only `http/https`.

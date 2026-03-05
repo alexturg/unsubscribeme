@@ -17,6 +17,7 @@ def _settings(tmp_path: Path, **overrides):
         "AI_SUMMARIZER_LANGUAGES": "ru,en",
         "AI_SUMMARIZER_MAX_SENTENCES": 7,
         "AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS": 0,
+        "AI_SUMMARIZER_SAVE_OUTPUT_FILES": False,
         "AI_SUMMARIZER_WEB_OPENAI_MAX_INPUT_WORDS": 1400,
         "AI_SUMMARIZER_WEB_FETCH_TIMEOUT_SEC": 15,
         "AI_SUMMARIZER_WEB_MAX_RESPONSE_BYTES": 2_000_000,
@@ -78,8 +79,8 @@ def test_summarize_video_extractive(monkeypatch, tmp_path):
     )
 
     assert result.summary_text == "- Bullet one"
-    assert result.summary_path.exists()
-    assert result.transcript_path is not None and result.transcript_path.exists()
+    assert result.summary_path is None
+    assert result.transcript_path is None
 
 
 def test_summarize_video_openai_custom_prompt(monkeypatch, tmp_path):
@@ -157,6 +158,34 @@ def test_summarize_video_openai_english_prompt_language(monkeypatch, tmp_path):
     assert calls["kwargs"]["target_language"] == "English"
 
 
+def test_summarize_video_openai_defaults_to_russian_without_prompt(monkeypatch, tmp_path):
+    settings = _settings(tmp_path)
+    calls = {}
+
+    monkeypatch.setattr(ai_summarizer, "extract_video_id", lambda _: "dQw4w9WgXcQ")
+    monkeypatch.setattr(
+        ai_summarizer,
+        "fetch_transcript",
+        lambda **_: [ai_summarizer.TranscriptSegment(text="Transcript text.", start=0.0, duration=1.0)],
+    )
+
+    def fake_openai_summary(text, **kwargs):
+        calls["kwargs"] = kwargs
+        return "- OpenAI bullet"
+
+    monkeypatch.setattr(ai_summarizer, "summarize_text_with_openai", fake_openai_summary)
+
+    asyncio.run(
+        ai_summarizer.summarize_video(
+            settings,
+            chat_id=10,
+            video_url="dQw4w9WgXcQ",
+            custom_prompt=None,
+        )
+    )
+    assert calls["kwargs"]["target_language"] == "Russian"
+
+
 def test_summarize_video_web_page_openai(monkeypatch, tmp_path):
     settings = _settings(tmp_path, AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS=0)
     calls = {}
@@ -188,7 +217,35 @@ def test_summarize_video_web_page_openai(monkeypatch, tmp_path):
     )
 
     assert result.summary_text == "- Web bullet"
-    assert result.transcript_path is not None and result.transcript_path.exists()
+    assert result.summary_path is None
+    assert result.transcript_path is None
     assert calls["text"].startswith("First factual paragraph.")
     assert calls["kwargs"]["max_input_words"] == 1400
     assert calls["kwargs"]["target_language"] == "Russian"
+
+
+def test_summarize_video_persists_files_only_when_enabled(monkeypatch, tmp_path):
+    settings = _settings(tmp_path, AI_SUMMARIZER_MODE="extractive", AI_SUMMARIZER_SAVE_OUTPUT_FILES=True)
+
+    monkeypatch.setattr(ai_summarizer, "extract_video_id", lambda _: "dQw4w9WgXcQ")
+    monkeypatch.setattr(
+        ai_summarizer,
+        "fetch_transcript",
+        lambda **_: [
+            ai_summarizer.TranscriptSegment(text="First sentence.", start=0.0, duration=1.0),
+            ai_summarizer.TranscriptSegment(text="Second sentence.", start=4.0, duration=1.0),
+        ],
+    )
+    monkeypatch.setattr(ai_summarizer, "summarize_text", lambda *_args, **_kwargs: "- Bullet one")
+
+    result = asyncio.run(
+        ai_summarizer.summarize_video(
+            settings,
+            chat_id=999,
+            video_url="https://youtu.be/dQw4w9WgXcQ",
+            custom_prompt=None,
+        )
+    )
+
+    assert result.summary_path is not None and result.summary_path.exists()
+    assert result.transcript_path is not None and result.transcript_path.exists()
