@@ -684,7 +684,8 @@ async def cmd_audio(message: Message) -> None:
 
     await message.answer("Готовлю аудио-файл из YouTube. Это может занять 20-90 секунд.")
 
-    info_text = ""
+    watch_url = f"https://www.youtube.com/watch?v={video_id}"
+    info_text = f"Оригинал: {watch_url}"
     try:
         info = await asyncio.to_thread(
             fetch_video_info,
@@ -692,10 +693,11 @@ async def cmd_audio(message: Message) -> None:
             yt_dlp_binary=str(getattr(DEPS.settings, "AI_SUMMARIZER_WHISPER_YTDLP_BINARY", "yt-dlp")),
             timeout_sec=60,
         )
-        size_hint = info.filesize_bytes if info.filesize_bytes is not None else info.filesize_approx_bytes
-        info_text = _video_info_text(info.title, info.duration_seconds, size_hint)
+        title = (info.title or "").strip()
+        if title:
+            info_text = f"Видео: {title}\nОригинал: {watch_url}"
     except Exception:
-        info_text = f"Видео: https://www.youtube.com/watch?v={video_id}\nРазмер видео: unknown"
+        info_text = f"Оригинал: {watch_url}"
 
     max_audio_send_bytes = int(getattr(DEPS.settings, "AI_AUDIO_EXPORT_MAX_BYTES", 48 * 1024 * 1024))
 
@@ -715,8 +717,7 @@ async def cmd_audio(message: Message) -> None:
             if audio_size > max_audio_send_bytes:
                 await message.answer(
                     html_escape(
-                        "Аудиофайл слишком большой для отправки в Telegram "
-                        f"({_format_size_mb(audio_size)} > {_format_size_mb(max_audio_send_bytes)}).\n{info_text}",
+                        f"Аудиофайл слишком большой для отправки в Telegram.\n{info_text}",
                         quote=False,
                     )
                 )
@@ -725,7 +726,7 @@ async def cmd_audio(message: Message) -> None:
             await message.answer_document(
                 document=FSInputFile(str(audio_path)),
                 caption=html_escape(
-                    f"Аудио готово.\n{info_text}\nРазмер аудио: {_format_size_mb(audio_size)}",
+                    f"Аудио готово.\n{info_text}",
                     quote=False,
                 ),
             )
