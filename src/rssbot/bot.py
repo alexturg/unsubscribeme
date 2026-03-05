@@ -445,7 +445,16 @@ async def _run_ai_summary(
     custom_prompt: Optional[str],
     send_text: Callable[[str], Awaitable[None]],
 ) -> None:
-    await send_text("Запускаю суммаризацию контента. Это может занять 20-90 секунд.")
+    async def _safe_send(text: str) -> bool:
+        try:
+            await send_text(text)
+            return True
+        except Exception as exc:
+            logging.error("Failed to send /ai message to chat_id=%s: %s", chat_id, exc, exc_info=True)
+            return False
+
+    if not await _safe_send("Запускаю суммаризацию контента. Это может занять 20-90 секунд."):
+        return
 
     try:
         result = await summarize_video(
@@ -455,11 +464,11 @@ async def _run_ai_summary(
             custom_prompt=custom_prompt,
         )
     except AiSummarizerError as exc:
-        await send_text(f"Не удалось сделать суммаризацию: {str(exc)}")
+        await _safe_send(f"Не удалось сделать суммаризацию: {str(exc)}")
         return
     except Exception as exc:
         logging.error("Unexpected /ai failure for chat_id=%s: %s", chat_id, exc, exc_info=True)
-        await send_text("Внутренняя ошибка при суммаризации.")
+        await _safe_send("Внутренняя ошибка при суммаризации.")
         return
 
     focus_text = ""
@@ -468,7 +477,8 @@ async def _run_ai_summary(
 
     response_text = f"Суммаризация готова.\nИсточник: {video_url}{focus_text}\n\n{result.summary_text}"
     for chunk in split_message_chunks(response_text):
-        await send_text(chunk)
+        if not await _safe_send(chunk):
+            return
 
 
 @router.message(Command("ai"))
@@ -479,22 +489,24 @@ async def cmd_ai(message: Message) -> None:
     """
     user_id = _ensure_user_id(message)
     if not user_id:
-        await message.answer("Доступ запрещен.")
+        await message.answer(html_escape("Доступ запрещен.", quote=False))
         return
 
     try:
         request = parse_ai_request_text(message.text or "")
     except ValueError:
         await message.answer(
-            "Использование: /ai <youtube_url_or_video_id_or_page_url> [дополнительный фокус]\n"
-            "Пример: /ai https://www.youtube.com/watch?v=dQw4w9WgXcQ "
-            "Выдели только практические выводы и риски.",
-            parse_mode=None,
+            html_escape(
+                "Использование: /ai <youtube_url_or_video_id_or_page_url> [дополнительный фокус]\n"
+                "Пример: /ai https://www.youtube.com/watch?v=dQw4w9WgXcQ "
+                "Выдели только практические выводы и риски.",
+                quote=False,
+            )
         )
         return
 
     async def _send_text(text: str) -> None:
-        await message.answer(text, parse_mode=None)
+        await message.answer(html_escape(text, quote=False))
 
     await _run_ai_summary(message.chat.id, request.video_url, request.custom_prompt, _send_text)
 
@@ -541,7 +553,7 @@ async def cb_ai_item(callback: CallbackQuery) -> None:
     await callback.answer("Запускаю /ai...")
 
     async def _send_text(text: str) -> None:
-        await callback.bot.send_message(chat_id=chat_id, text=text, parse_mode=None)
+        await callback.bot.send_message(chat_id=chat_id, text=html_escape(text, quote=False))
 
     await _run_ai_summary(chat_id, video_url, None, _send_text)
 
