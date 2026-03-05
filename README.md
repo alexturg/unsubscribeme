@@ -36,6 +36,7 @@ AI summary (`/ai`) setup:
 - Web page mode tuning: `AI_SUMMARIZER_WEB_OPENAI_MAX_INPUT_WORDS`, `AI_SUMMARIZER_WEB_FETCH_TIMEOUT_SEC`, `AI_SUMMARIZER_WEB_MAX_RESPONSE_BYTES`, `AI_SUMMARIZER_WEB_MAX_EXTRACTED_WORDS`.
 - If YouTube subtitles are unavailable, `/ai` now returns a provisional summary based on short description + top comments and shows a button to run full Whisper transcription.
 - Whisper flow requirements: `yt-dlp` binary on server (`AI_SUMMARIZER_WHISPER_YTDLP_BINARY`) and valid `OPENAI_API_KEY`.
+- Whisper flow now normalizes audio and auto-splits long files into parts to stay under OpenAI upload limits.
 - Fallback tuning: `AI_SUMMARIZER_YOUTUBE_CONTEXT_*` settings let you cap extracted HTML/comments and OpenAI input size to save tokens.
 - Whisper tuning: `AI_SUMMARIZER_WHISPER_MODEL`, `AI_SUMMARIZER_WHISPER_MAX_AUDIO_MB`, `AI_SUMMARIZER_WHISPER_DOWNLOAD_TIMEOUT_SEC`.
 - Security note: web-page summarization blocks private/local addresses and accepts only `http/https`.

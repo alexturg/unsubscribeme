@@ -9,6 +9,9 @@ from urllib.parse import parse_qs, urlparse
 
 VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
 WHITESPACE_RE = re.compile(r"\s+")
+OPENAI_TRANSCRIPTION_HARD_LIMIT_BYTES = 25 * 1024 * 1024
+# Multipart/form-data wrapper adds overhead beyond raw audio file bytes.
+OPENAI_TRANSCRIPTION_UPLOAD_OVERHEAD_BYTES = 1_200_000
 
 
 class TranscriptError(RuntimeError):
@@ -125,6 +128,38 @@ def _normalize_space(text: str) -> str:
     return WHITESPACE_RE.sub(" ", (text or "")).strip()
 
 
+def _run_subprocess_checked(
+    cmd: list[str],
+    *,
+    timeout_sec: int,
+    fail_message: str,
+) -> None:
+    try:
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+    except FileNotFoundError as exc:
+        binary = cmd[0] if cmd else "command"
+        raise WhisperTranscriptionError(f"{fail_message}: не найден бинарник {binary}.") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise WhisperTranscriptionError(
+            f"{fail_message}: таймаут выполнения команды ({timeout_sec} сек)."
+        ) from exc
+    except Exception as exc:
+        raise WhisperTranscriptionError(f"{fail_message}: {exc}") from exc
+
+    if proc.returncode != 0:
+        details = _normalize_space(proc.stderr or proc.stdout or "")[:300]
+        raise WhisperTranscriptionError(
+            f"{fail_message}: команда завершилась с ошибкой."
+            + (f" Детали: {details}" if details else "")
+        )
+
+
 def _download_audio_for_whisper(
     *,
     watch_url: str,
@@ -148,32 +183,11 @@ def _download_audio_for_whisper(
         watch_url,
     ]
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-        )
-    except FileNotFoundError as exc:
-        raise WhisperTranscriptionError(
-            "Whisper fallback недоступен: не найден бинарник yt-dlp на сервере."
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise WhisperTranscriptionError(
-            f"Whisper fallback: таймаут скачивания аудио ({timeout_sec} сек)."
-        ) from exc
-    except Exception as exc:
-        raise WhisperTranscriptionError(f"Whisper fallback: ошибка скачивания аудио: {exc}") from exc
-
-    if proc.returncode != 0:
-        details = (proc.stderr or proc.stdout or "").strip()
-        details = _normalize_space(details)[:300]
-        raise WhisperTranscriptionError(
-            "Whisper fallback: не удалось скачать аудио через yt-dlp."
-            + (f" Детали: {details}" if details else "")
-        )
+    _run_subprocess_checked(
+        cmd,
+        timeout_sec=timeout_sec,
+        fail_message="Whisper fallback: не удалось скачать аудио через yt-dlp",
+    )
 
     candidates = sorted(work_dir.glob("audio.*"))
     audio_candidates = [path for path in candidates if path.suffix.lower() not in {".part", ".ytdl"}]
@@ -183,6 +197,94 @@ def _download_audio_for_whisper(
         )
 
     return audio_candidates[0]
+
+
+def _transcode_audio_for_whisper(
+    *,
+    source_audio: Path,
+    output_audio: Path,
+    timeout_sec: int,
+) -> Path:
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(source_audio),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-b:a",
+        "24k",
+        str(output_audio),
+    ]
+    _run_subprocess_checked(
+        cmd,
+        timeout_sec=timeout_sec,
+        fail_message="Whisper fallback: не удалось подготовить аудио через ffmpeg",
+    )
+    if not output_audio.exists():
+        raise WhisperTranscriptionError(
+            "Whisper fallback: ffmpeg не создал файл нормализованного аудио."
+        )
+    return output_audio
+
+
+def _split_audio_for_whisper(
+    *,
+    source_audio: Path,
+    work_dir: Path,
+    segment_seconds: int,
+    timeout_sec: int,
+) -> list[Path]:
+    suffix = source_audio.suffix or ".mp3"
+    for stale in work_dir.glob(f"{source_audio.stem}_part_*{suffix}"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+    pattern = work_dir / f"{source_audio.stem}_part_%03d{suffix}"
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(source_audio),
+        "-f",
+        "segment",
+        "-segment_time",
+        str(max(30, segment_seconds)),
+        "-c",
+        "copy",
+        str(pattern),
+    ]
+    _run_subprocess_checked(
+        cmd,
+        timeout_sec=timeout_sec,
+        fail_message="Whisper fallback: не удалось разбить аудио на части",
+    )
+
+    parts = sorted(work_dir.glob(f"{source_audio.stem}_part_*{suffix}"))
+    if len(parts) < 2:
+        raise WhisperTranscriptionError(
+            "Whisper fallback: аудио не удалось разбить на части безопасного размера."
+        )
+    return parts
+
+
+def _extract_transcription_text(response: object) -> str:
+    if isinstance(response, str):
+        return _normalize_space(response)
+    text = getattr(response, "text", "")
+    if isinstance(text, str):
+        return _normalize_space(text)
+    return ""
+
+
+def _is_payload_too_large_error(exc: Exception) -> bool:
+    message = _normalize_space(str(exc)).lower()
+    return "413" in message and "maximum content size limit" in message
 
 
 def transcribe_video_with_whisper(
@@ -210,48 +312,88 @@ def transcribe_video_with_whisper(
         ) from exc
 
     max_audio_bytes = max_audio_megabytes * 1024 * 1024
+    safe_upload_bytes = min(
+        max_audio_bytes,
+        OPENAI_TRANSCRIPTION_HARD_LIMIT_BYTES - OPENAI_TRANSCRIPTION_UPLOAD_OVERHEAD_BYTES,
+    )
+    if safe_upload_bytes < 1_000_000:
+        raise ValueError("max_audio_megabytes is too low for Whisper upload.")
 
     with tempfile.TemporaryDirectory(prefix="yt_whisper_") as tmp_dir:
         work_dir = Path(tmp_dir)
-        audio_path = _download_audio_for_whisper(
+        downloaded_audio = _download_audio_for_whisper(
             watch_url=watch_url,
             work_dir=work_dir,
             yt_dlp_binary=yt_dlp_binary,
             timeout_sec=download_timeout_sec,
         )
 
+        normalized_audio = _transcode_audio_for_whisper(
+            source_audio=downloaded_audio,
+            output_audio=work_dir / "audio_for_whisper.mp3",
+            timeout_sec=download_timeout_sec,
+        )
         try:
-            size_bytes = audio_path.stat().st_size
+            normalized_size = normalized_audio.stat().st_size
         except OSError as exc:
             raise WhisperTranscriptionError(
-                f"Whisper fallback: не удалось прочитать размер аудиофайла ({exc})."
+                f"Whisper fallback: не удалось прочитать размер нормализованного аудио ({exc})."
             ) from exc
-        if size_bytes > max_audio_bytes:
-            size_mb = size_bytes / (1024 * 1024)
+
+        audio_parts: list[Path] = [normalized_audio]
+        if normalized_size > safe_upload_bytes:
+            audio_parts = _split_audio_for_whisper(
+                source_audio=normalized_audio,
+                work_dir=work_dir,
+                segment_seconds=900,
+                timeout_sec=download_timeout_sec,
+            )
+            oversize_parts = [part for part in audio_parts if part.stat().st_size > safe_upload_bytes]
+            if oversize_parts:
+                audio_parts = _split_audio_for_whisper(
+                    source_audio=normalized_audio,
+                    work_dir=work_dir,
+                    segment_seconds=300,
+                    timeout_sec=download_timeout_sec,
+                )
+
+        oversize_after_split = [part for part in audio_parts if part.stat().st_size > safe_upload_bytes]
+        if oversize_after_split:
+            largest_part = max(oversize_after_split, key=lambda path: path.stat().st_size)
+            size_mb = largest_part.stat().st_size / (1024 * 1024)
             raise WhisperTranscriptionError(
-                f"Whisper fallback: аудио слишком большое ({size_mb:.1f} MB), лимит {max_audio_megabytes} MB."
+                "Whisper fallback: даже после разбиения аудио часть остаётся слишком большой "
+                f"({size_mb:.1f} MB). Попробуйте более короткое видео."
             )
 
+        transcript_chunks: list[str] = []
         try:
             client = OpenAI(api_key=api_key) if api_key else OpenAI()
-            with audio_path.open("rb") as audio_file:
-                response = client.audio.transcriptions.create(
-                    model=model,
-                    file=audio_file,
-                    response_format="text",
-                )
+            for audio_part in audio_parts:
+                with audio_part.open("rb") as audio_file:
+                    try:
+                        response = client.audio.transcriptions.create(
+                            model=model,
+                            file=audio_file,
+                            response_format="text",
+                        )
+                    except Exception as exc:
+                        if _is_payload_too_large_error(exc):
+                            raise WhisperTranscriptionError(
+                                "Whisper fallback: часть аудио превысила лимит OpenAI. "
+                                "Попробуйте уменьшить длительность видео."
+                            ) from exc
+                        raise
+                text_part = _extract_transcription_text(response)
+                if text_part:
+                    transcript_chunks.append(text_part)
         except Exception as exc:
+            if isinstance(exc, WhisperTranscriptionError):
+                raise
             message = _normalize_space(str(exc)) or "Unknown Whisper API error"
             raise WhisperTranscriptionError(f"Whisper transcription failed: {message}") from exc
 
-    if isinstance(response, str):
-        transcript = response
-    else:
-        transcript = getattr(response, "text", "")
-        if not isinstance(transcript, str):
-            transcript = ""
-
-    transcript = _normalize_space(transcript)
+    transcript = _normalize_space("\n".join(transcript_chunks))
     if not transcript:
         raise WhisperTranscriptionError("Whisper transcription returned empty text.")
     return transcript
