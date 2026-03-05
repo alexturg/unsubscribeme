@@ -6,6 +6,7 @@ __all__ = [
     "scheduler",
     "bot",
     "ai_summarizer",
+    "youtube_context",
     "youtube_transcribe",
     "youtube_summarize",
 ]

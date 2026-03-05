@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 import re
+import subprocess
+import tempfile
 from urllib.parse import parse_qs, urlparse
 
 VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
+WHITESPACE_RE = re.compile(r"\s+")
 
 
 class TranscriptError(RuntimeError):
     """Raised when transcript fetch fails."""
+
+
+class WhisperTranscriptionError(RuntimeError):
+    """Raised when Whisper-based transcription fails."""
 
 
 @dataclass(frozen=True)
@@ -111,3 +119,139 @@ def fetch_transcript(video_id: str, languages: list[str]) -> list[TranscriptSegm
         )
 
     return segments
+
+
+def _normalize_space(text: str) -> str:
+    return WHITESPACE_RE.sub(" ", (text or "")).strip()
+
+
+def _download_audio_for_whisper(
+    *,
+    watch_url: str,
+    work_dir: Path,
+    yt_dlp_binary: str,
+    timeout_sec: int,
+) -> Path:
+    output_template = str((work_dir / "audio.%(ext)s").resolve())
+    cmd = [
+        yt_dlp_binary,
+        "--no-playlist",
+        "--quiet",
+        "--no-warnings",
+        "--extract-audio",
+        "--audio-format",
+        "mp3",
+        "--audio-quality",
+        "9",
+        "--output",
+        output_template,
+        watch_url,
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+    except FileNotFoundError as exc:
+        raise WhisperTranscriptionError(
+            "Whisper fallback недоступен: не найден бинарник yt-dlp на сервере."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise WhisperTranscriptionError(
+            f"Whisper fallback: таймаут скачивания аудио ({timeout_sec} сек)."
+        ) from exc
+    except Exception as exc:
+        raise WhisperTranscriptionError(f"Whisper fallback: ошибка скачивания аудио: {exc}") from exc
+
+    if proc.returncode != 0:
+        details = (proc.stderr or proc.stdout or "").strip()
+        details = _normalize_space(details)[:300]
+        raise WhisperTranscriptionError(
+            "Whisper fallback: не удалось скачать аудио через yt-dlp."
+            + (f" Детали: {details}" if details else "")
+        )
+
+    candidates = sorted(work_dir.glob("audio.*"))
+    audio_candidates = [path for path in candidates if path.suffix.lower() not in {".part", ".ytdl"}]
+    if not audio_candidates:
+        raise WhisperTranscriptionError(
+            "Whisper fallback: yt-dlp не создал аудиофайл для транскрипции."
+        )
+
+    return audio_candidates[0]
+
+
+def transcribe_video_with_whisper(
+    video_url_or_id: str,
+    *,
+    model: str = "whisper-1",
+    api_key: str | None = None,
+    max_audio_megabytes: int = 24,
+    download_timeout_sec: int = 240,
+    yt_dlp_binary: str = "yt-dlp",
+) -> str:
+    if max_audio_megabytes < 1:
+        raise ValueError("max_audio_megabytes must be >= 1")
+    if download_timeout_sec < 10:
+        raise ValueError("download_timeout_sec must be >= 10")
+
+    video_id = extract_video_id(video_url_or_id)
+    watch_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise WhisperTranscriptionError(
+            "Missing optional dependency 'openai'. Install it with: pip install openai"
+        ) from exc
+
+    max_audio_bytes = max_audio_megabytes * 1024 * 1024
+
+    with tempfile.TemporaryDirectory(prefix="yt_whisper_") as tmp_dir:
+        work_dir = Path(tmp_dir)
+        audio_path = _download_audio_for_whisper(
+            watch_url=watch_url,
+            work_dir=work_dir,
+            yt_dlp_binary=yt_dlp_binary,
+            timeout_sec=download_timeout_sec,
+        )
+
+        try:
+            size_bytes = audio_path.stat().st_size
+        except OSError as exc:
+            raise WhisperTranscriptionError(
+                f"Whisper fallback: не удалось прочитать размер аудиофайла ({exc})."
+            ) from exc
+        if size_bytes > max_audio_bytes:
+            size_mb = size_bytes / (1024 * 1024)
+            raise WhisperTranscriptionError(
+                f"Whisper fallback: аудио слишком большое ({size_mb:.1f} MB), лимит {max_audio_megabytes} MB."
+            )
+
+        try:
+            client = OpenAI(api_key=api_key) if api_key else OpenAI()
+            with audio_path.open("rb") as audio_file:
+                response = client.audio.transcriptions.create(
+                    model=model,
+                    file=audio_file,
+                    response_format="text",
+                )
+        except Exception as exc:
+            message = _normalize_space(str(exc)) or "Unknown Whisper API error"
+            raise WhisperTranscriptionError(f"Whisper transcription failed: {message}") from exc
+
+    if isinstance(response, str):
+        transcript = response
+    else:
+        transcript = getattr(response, "text", "")
+        if not isinstance(transcript, str):
+            transcript = ""
+
+    transcript = _normalize_space(transcript)
+    if not transcript:
+        raise WhisperTranscriptionError("Whisper transcription returned empty text.")
+    return transcript

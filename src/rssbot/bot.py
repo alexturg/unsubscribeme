@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .config import Settings
 from .db import Delivery, Feed, FeedBaseline, FeedRule, Item, Session, User, session_scope
@@ -25,6 +25,7 @@ from .ai_summarizer import (
     split_message_chunks,
     summarize_video,
 )
+from .youtube_transcribe import extract_video_id
 from utils.yt_channel_id import get_channel_id
 
 
@@ -443,17 +444,24 @@ async def _run_ai_summary(
     chat_id: int,
     video_url: str,
     custom_prompt: Optional[str],
-    send_text: Callable[[str], Awaitable[None]],
+    send_text: Callable[[str, Optional[InlineKeyboardMarkup]], Awaitable[None]],
+    *,
+    force_whisper: bool = False,
 ) -> None:
-    async def _safe_send(text: str) -> bool:
+    async def _safe_send(text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> bool:
         try:
-            await send_text(text)
+            await send_text(text, reply_markup)
             return True
         except Exception as exc:
             logging.error("Failed to send /ai message to chat_id=%s: %s", chat_id, exc, exc_info=True)
             return False
 
-    if not await _safe_send("Запускаю суммаризацию контента. Это может занять 20-90 секунд."):
+    start_text = (
+        "Запускаю транскрипцию видео через Whisper и суммаризацию. Это может занять 30-180 секунд."
+        if force_whisper
+        else "Запускаю суммаризацию контента. Это может занять 20-90 секунд."
+    )
+    if not await _safe_send(start_text):
         return
 
     try:
@@ -462,6 +470,7 @@ async def _run_ai_summary(
             chat_id=chat_id,
             video_url=video_url,
             custom_prompt=custom_prompt,
+            force_whisper=force_whisper,
         )
     except AiSummarizerError as exc:
         await _safe_send(f"Не удалось сделать суммаризацию: {str(exc)}")
@@ -475,7 +484,30 @@ async def _run_ai_summary(
     if custom_prompt:
         focus_text = f"\nФокус: {custom_prompt}"
 
-    response_text = f"Суммаризация готова.\nИсточник: {video_url}{focus_text}\n\n{result.summary_text}"
+    if result.summary_basis == "metadata_comments":
+        status_line = (
+            "Субтитры не найдены. Ниже предварительная краткая сводка по описанию и комментариям."
+        )
+    elif result.summary_basis == "whisper":
+        status_line = "Суммаризация готова по транскрипции Whisper."
+    else:
+        status_line = "Суммаризация готова."
+
+    response_text = f"{status_line}\nИсточник: {video_url}{focus_text}\n\n{result.summary_text}"
+    if result.summary_basis == "metadata_comments" and result.video_id and not force_whisper:
+        whisper_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="Сделать транскрипцию через Whisper",
+                        callback_data=f"ai:whisper:{result.video_id}",
+                    )
+                ]
+            ]
+        )
+        await _safe_send(response_text, reply_markup=whisper_kb)
+        return
+
     for chunk in split_message_chunks(response_text):
         if not await _safe_send(chunk):
             return
@@ -505,8 +537,11 @@ async def cmd_ai(message: Message) -> None:
         )
         return
 
-    async def _send_text(text: str) -> None:
-        await message.answer(html_escape(text, quote=False))
+    async def _send_text(text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> None:
+        await message.answer(
+            html_escape(text, quote=False),
+            reply_markup=reply_markup,
+        )
 
     await _run_ai_summary(message.chat.id, request.video_url, request.custom_prompt, _send_text)
 
@@ -552,10 +587,46 @@ async def cb_ai_item(callback: CallbackQuery) -> None:
 
     await callback.answer("Запускаю /ai...")
 
-    async def _send_text(text: str) -> None:
-        await callback.bot.send_message(chat_id=chat_id, text=html_escape(text, quote=False))
+    async def _send_text(text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> None:
+        await callback.bot.send_message(
+            chat_id=chat_id,
+            text=html_escape(text, quote=False),
+            reply_markup=reply_markup,
+        )
 
     await _run_ai_summary(chat_id, video_url, None, _send_text)
+
+
+@router.callback_query(F.data.startswith("ai:whisper:"))
+async def cb_ai_whisper(callback: CallbackQuery) -> None:
+    message = callback.message
+    if message is None:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+
+    chat_id = message.chat.id
+    if not _is_allowed(chat_id):
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
+
+    raw_data = callback.data or ""
+    try:
+        video_id = extract_video_id(raw_data.split(":", 2)[2])
+    except Exception:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+
+    await callback.answer("Запускаю Whisper...")
+
+    async def _send_text(text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> None:
+        await callback.bot.send_message(
+            chat_id=chat_id,
+            text=html_escape(text, quote=False),
+            reply_markup=reply_markup,
+        )
+
+    watch_url = f"https://www.youtube.com/watch?v={video_id}"
+    await _run_ai_summary(chat_id, watch_url, None, _send_text, force_whisper=True)
 
 
 @router.message(Command("youtube"))
