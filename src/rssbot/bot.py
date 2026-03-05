@@ -7,13 +7,13 @@ import json
 import logging
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from .config import Settings
 from .db import Delivery, Feed, FeedBaseline, FeedRule, Item, Session, User, session_scope
@@ -439,11 +439,43 @@ async def _extract_youtube_channel_id(url: str) -> Optional[str]:
         return None
 
 
+async def _run_ai_summary(
+    chat_id: int,
+    video_url: str,
+    custom_prompt: Optional[str],
+    send_text: Callable[[str], Awaitable[None]],
+) -> None:
+    await send_text("Запускаю суммаризацию контента. Это может занять 20-90 секунд.")
+
+    try:
+        result = await summarize_video(
+            DEPS.settings,
+            chat_id=chat_id,
+            video_url=video_url,
+            custom_prompt=custom_prompt,
+        )
+    except AiSummarizerError as exc:
+        await send_text(f"Не удалось сделать суммаризацию: {str(exc)}")
+        return
+    except Exception as exc:
+        logging.error("Unexpected /ai failure for chat_id=%s: %s", chat_id, exc, exc_info=True)
+        await send_text("Внутренняя ошибка при суммаризации.")
+        return
+
+    focus_text = ""
+    if custom_prompt:
+        focus_text = f"\nФокус: {custom_prompt}"
+
+    response_text = f"Суммаризация готова.\nИсточник: {video_url}{focus_text}\n\n{result.summary_text}"
+    for chunk in split_message_chunks(response_text):
+        await send_text(chunk)
+
+
 @router.message(Command("ai"))
 async def cmd_ai(message: Message) -> None:
-    """Суммаризировать YouTube-видео через внутренний AI-инструмент.
+    """Суммаризировать YouTube-видео или обычную веб-страницу.
 
-    Формат: /ai <youtube_url_or_video_id> [что именно вас интересует]
+    Формат: /ai <youtube_url_or_video_id_or_page_url> [что именно вас интересует]
     """
     user_id = _ensure_user_id(message)
     if not user_id:
@@ -454,42 +486,64 @@ async def cmd_ai(message: Message) -> None:
         request = parse_ai_request_text(message.text or "")
     except ValueError:
         await message.answer(
-            "Использование: /ai <youtube_url_or_video_id> [дополнительный фокус]\n"
+            "Использование: /ai <youtube_url_or_video_id_or_page_url> [дополнительный фокус]\n"
             "Пример: /ai https://www.youtube.com/watch?v=dQw4w9WgXcQ "
             "Выдели только практические выводы и риски.",
             parse_mode=None,
         )
         return
 
-    await message.answer(
-        "Запускаю суммаризацию видео. Это может занять 20-90 секунд.",
-        parse_mode=None,
-    )
+    async def _send_text(text: str) -> None:
+        await message.answer(text, parse_mode=None)
 
+    await _run_ai_summary(message.chat.id, request.video_url, request.custom_prompt, _send_text)
+
+
+@router.callback_query(F.data.startswith("ai:item:"))
+async def cb_ai_item(callback: CallbackQuery) -> None:
+    message = callback.message
+    if message is None:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+
+    chat_id = message.chat.id
+    if not _is_allowed(chat_id):
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
+
+    raw_data = callback.data or ""
     try:
-        result = await summarize_video(
-            DEPS.settings,
-            chat_id=message.chat.id,
-            video_url=request.video_url,
-            custom_prompt=request.custom_prompt,
-        )
-    except AiSummarizerError as exc:
-        await message.answer(f"Не удалось сделать суммаризацию: {str(exc)}", parse_mode=None)
-        return
-    except Exception as exc:
-        logging.error("Unexpected /ai failure for chat_id=%s: %s", message.chat.id, exc, exc_info=True)
-        await message.answer("Внутренняя ошибка при суммаризации.", parse_mode=None)
+        item_id = int(raw_data.split(":", 2)[2])
+    except Exception:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
         return
 
-    focus_text = ""
-    if request.custom_prompt:
-        focus_text = f"\nФокус: {request.custom_prompt}"
+    error_text: Optional[str] = None
+    video_url = ""
+    with session_scope() as s:
+        user = s.query(User).filter(User.chat_id == chat_id).first()
+        item = s.get(Item, item_id)
+        if not user or not item:
+            error_text = "Запись не найдена."
+        else:
+            feed = s.get(Feed, item.feed_id)
+            if not feed or feed.user_id != user.id:
+                error_text = "Запись недоступна."
+            else:
+                video_url = (item.link or "").strip()
+                if not video_url:
+                    error_text = "У записи нет ссылки."
 
-    response_text = (
-        f"Суммаризация готова.\nВидео: {request.video_url}{focus_text}\n\n{result.summary_text}"
-    )
-    for chunk in split_message_chunks(response_text):
-        await message.answer(chunk, parse_mode=None)
+    if error_text:
+        await callback.answer(error_text, show_alert=True)
+        return
+
+    await callback.answer("Запускаю /ai...")
+
+    async def _send_text(text: str) -> None:
+        await callback.bot.send_message(chat_id=chat_id, text=text, parse_mode=None)
+
+    await _run_ai_summary(chat_id, video_url, None, _send_text)
 
 
 @router.message(Command("youtube"))

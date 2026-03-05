@@ -1,16 +1,17 @@
 import asyncio
 from datetime import datetime, timedelta
 
+from aiogram.types import InlineKeyboardMarkup
 from rssbot.db import Delivery, Feed, FeedBaseline, Item, User, init_engine, session_scope
 from rssbot.scheduler import BotScheduler
 
 
 class DummyBot:
     def __init__(self) -> None:
-        self.messages: list[tuple[int, str]] = []
+        self.messages: list[tuple[int, str, object]] = []
 
     async def send_message(self, chat_id: int, text: str, reply_markup=None):
-        self.messages.append((chat_id, text))
+        self.messages.append((chat_id, text, reply_markup))
         return {"ok": True}
 
 
@@ -169,3 +170,77 @@ def test_deliver_due_event_starts_skips_duplicate_items_by_title_and_time(tmp_pa
         deliveries = s.query(Delivery).filter(Delivery.feed_id == feed_id).all()
         assert len(deliveries) == 1
         assert deliveries[0].status == "ok"
+
+
+def test_send_video_message_attaches_ai_callback_for_item():
+    bot = DummyBot()
+    scheduler = BotScheduler(bot=bot)
+
+    status, error = asyncio.run(
+        scheduler._send_video_message(
+            chat_id=12345,
+            title="Video title",
+            link="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            feed_name="Test feed",
+            item_id=42,
+        )
+    )
+
+    assert status == "ok"
+    assert error is None
+    assert len(bot.messages) == 1
+    _, _, reply_markup = bot.messages[0]
+    assert isinstance(reply_markup, InlineKeyboardMarkup)
+    assert len(reply_markup.inline_keyboard) == 1
+    assert len(reply_markup.inline_keyboard[0]) == 2
+    assert reply_markup.inline_keyboard[0][0].text == "Открыть"
+    assert reply_markup.inline_keyboard[0][1].text == "Сделать /ai"
+    assert reply_markup.inline_keyboard[0][1].callback_data == "ai:item:42"
+
+
+def test_send_video_message_without_item_id_has_only_open_button():
+    bot = DummyBot()
+    scheduler = BotScheduler(bot=bot)
+
+    status, error = asyncio.run(
+        scheduler._send_video_message(
+            chat_id=12345,
+            title="Video title",
+            link="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            feed_name="Test feed",
+            item_id=None,
+        )
+    )
+
+    assert status == "ok"
+    assert error is None
+    assert len(bot.messages) == 1
+    _, _, reply_markup = bot.messages[0]
+    assert isinstance(reply_markup, InlineKeyboardMarkup)
+    assert len(reply_markup.inline_keyboard) == 1
+    assert len(reply_markup.inline_keyboard[0]) == 1
+    assert reply_markup.inline_keyboard[0][0].text == "Открыть"
+
+
+def test_send_video_message_non_youtube_has_only_open_button():
+    bot = DummyBot()
+    scheduler = BotScheduler(bot=bot)
+
+    status, error = asyncio.run(
+        scheduler._send_video_message(
+            chat_id=12345,
+            title="Article title",
+            link="https://example.com/post/123",
+            feed_name="Test feed",
+            item_id=42,
+        )
+    )
+
+    assert status == "ok"
+    assert error is None
+    assert len(bot.messages) == 1
+    _, _, reply_markup = bot.messages[0]
+    assert isinstance(reply_markup, InlineKeyboardMarkup)
+    assert len(reply_markup.inline_keyboard) == 1
+    assert len(reply_markup.inline_keyboard[0]) == 1
+    assert reply_markup.inline_keyboard[0][0].text == "Открыть"
