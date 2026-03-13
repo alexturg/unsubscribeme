@@ -7,6 +7,7 @@ Bot that fetches YouTube RSS feeds, filters by rules, and delivers updates:
 
 Quick start:
 - Copy `.env.example` to `.env` and set `TELEGRAM_BOT_TOKEN` and `ALLOWED_CHAT_IDS`.
+- Repository includes `data/bot.demo.sqlite` with synthetic demo data; keep your real `data/bot.sqlite` local only.
 - Python 3.9+ required.
 - Install and run:
   - `pip install .`

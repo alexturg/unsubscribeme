@@ -210,3 +210,8 @@ __marimo__/
 .env
 .DS_Store
 *.DS_Store
+
+# Local runtime DB (contains personal data and should never be committed)
+data/bot.sqlite
+data/bot.sqlite-shm
+data/bot.sqlite-wal
