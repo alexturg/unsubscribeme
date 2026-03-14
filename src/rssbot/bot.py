@@ -105,10 +105,16 @@ async def cmd_start(message: Message) -> None:
             s.flush()
     web_link = f"http://{DEPS.settings.WEB_HOST}:{DEPS.settings.WEB_PORT}/u/{message.chat.id}"
     await message.answer(
-        "Привет! Настраивать ленты теперь удобнее в веб-интерфейсе.\n"
-        f"Открой: {web_link}\n\n"
-        "Команды: /ai, /audio, /transcribe, /addfeed, /addeventsource, /addics, /addevents, "
-        "/youtube, /channel, /playlist, /list, /remove, /setmode, /setfilter, /digest, /mute, /unmute"
+        "Привет! Я <b>UnsubscribeMe</b>.\n"
+        "Помогаю следить за YouTube/RSS и событиями с фильтрацией и AI.\n\n"
+        f"<b>Веб-интерфейс:</b> {web_link}\n\n"
+        "<b>Быстрый старт:</b>\n"
+        "1) Добавь источник: /youtube, /channel, /playlist или /addfeed\n"
+        "2) Проверь список: /list\n"
+        "3) Настрой режим/фильтры: /setmode, /setfilter\n\n"
+        "<b>События:</b> /addeventsource, /addics, /addevents\n"
+        "<b>AI:</b> /ai, /audio, /transcribe\n"
+        "<b>Управление:</b> /remove, /mute, /unmute, /digest"
     )
 
 

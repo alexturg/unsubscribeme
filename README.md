@@ -1,56 +1,213 @@
-# UnsubscribeMe — Telegram YouTube RSS Bot
+# UnsubscribeMe
 
-Bot that fetches YouTube RSS feeds, filters by rules, and delivers updates:
-- Modes per feed: `immediate`, `digest`, `on_demand`.
-- Include/exclude keywords and regex, categories, duration.
-- Daily digests at a chosen local time.
+Telegram-бот для мониторинга YouTube RSS и событийных источников (JSON/ICS) с фильтрацией, режимами доставки и AI-функциями.
 
-Quick start:
-- Copy `.env.example` to `.env` and set `TELEGRAM_BOT_TOKEN` and `ALLOWED_CHAT_IDS`.
-- Repository includes `data/bot.demo.sqlite` with synthetic demo data; keep your real `data/bot.sqlite` local only.
-- Python 3.9+ required.
-- Install and run:
-  - `pip install .`
-  - `unsubscribeme`
+## Содержание
 
-Core commands:
-- `/start` — register.
-- `/ai <youtube_url_or_video_id_or_page_url> [дополнительный фокус]` — сделать AI-суммаризацию YouTube-видео или обычной веб-страницы.
-- `/audio <youtube_url_or_video_id>` — выгрузить аудио YouTube-видео файлом.
-- `/transcribe <youtube_url_or_video_id>` — получить транскрипт в `.txt`; если субтитров нет, бот предложит подтверждение Whisper кнопкой.
-- `/addfeed <url> [mode=immediate|digest|on_demand] [label=...] [interval=10] [time=HH:MM]`
-- `/addeventsource <url> [type=json|ics] [label=...] [interval=1]` — add events source (start notifications)
-- `/addics <url> [label=...] [interval=1]` — add ICS calendar events source (start notifications)
-- `/addevents [feed=<id>|<id>] [label=...] [interval=1]` + multiline rows in message — add events directly from Telegram text/CSV rows
-- `/channel <channel_id> [mode=...] [label=...] [interval=10] [time=HH:MM]`
-- `/playlist <playlist_id> [mode=...] [label=...] [interval=10] [time=HH:MM]`
-- `/list` — list feeds.
-- `/remove <feed_id>`
-- `/setmode <feed_id> <mode> [time=HH:MM]`
-- `/setfilter <feed_id> <json>` — e.g. `{ "include_keywords": ["обзор"] }`
-- `/digest [feed_id|all]`
-- `/mute <feed_id>` / `/unmute <feed_id>`
+- [Что умеет бот](#что-умеет-бот)
+- [Как это работает](#как-это-работает)
+- [Быстрый старт](#быстрый-старт)
+- [Конфигурация `.env`](#конфигурация-env)
+- [Режимы доставки](#режимы-доставки)
+- [Команды Telegram](#команды-telegram)
+- [Форматы источников событий](#форматы-источников-событий)
+- [Веб-интерфейс](#веб-интерфейс)
+- [Запуск в Docker](#запуск-в-docker)
+- [Тестирование](#тестирование)
+- [Диагностика](#диагностика)
+- [Безопасность и приватность](#безопасность-и-приватность)
+- [Структура проекта](#структура-проекта)
+- [Документация](#документация)
+- [Лицензия](#лицензия)
 
-AI summary (`/ai`) setup:
-- Default mode is `openai`, set `OPENAI_API_KEY` in `.env`.
-- By default, `/ai` does not write summary artifacts to disk (reply-only mode in Telegram).
-- To enable file persistence, set `AI_SUMMARIZER_SAVE_OUTPUT_FILES=true`.
-- Optional tuning: `AI_SUMMARIZER_OPENAI_MODEL`, `AI_SUMMARIZER_LANGUAGES`, `AI_SUMMARIZER_MAX_SENTENCES`, `AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS`.
-- Web page mode tuning: `AI_SUMMARIZER_WEB_OPENAI_MAX_INPUT_WORDS`, `AI_SUMMARIZER_WEB_FETCH_TIMEOUT_SEC`, `AI_SUMMARIZER_WEB_MAX_RESPONSE_BYTES`, `AI_SUMMARIZER_WEB_MAX_EXTRACTED_WORDS`.
-- If YouTube subtitles are unavailable, `/ai` now returns a provisional summary based on short description + top comments and shows a button to run full Whisper transcription.
-- Whisper flow requirements: `yt-dlp` binary on server (`AI_SUMMARIZER_WHISPER_YTDLP_BINARY`) and valid `OPENAI_API_KEY`.
-- Whisper flow now normalizes audio and auto-splits long files into parts to stay under OpenAI upload limits.
-- `/transcribe` shows video duration/size info before Whisper confirmation when subtitles are missing.
-- Fallback tuning: `AI_SUMMARIZER_YOUTUBE_CONTEXT_*` settings let you cap extracted HTML/comments and OpenAI input size to save tokens.
-- Whisper tuning: `AI_SUMMARIZER_WHISPER_MODEL`, `AI_SUMMARIZER_WHISPER_MAX_AUDIO_MB`, `AI_SUMMARIZER_WHISPER_DOWNLOAD_TIMEOUT_SEC`.
-- Security note: web-page summarization blocks private/local addresses and accepts only `http/https`.
+## Что умеет бот
 
-JSON events source format:
-- Either an array of events, or an object with `events: []`.
-- Required fields per event: `title`, `link` (or `url`), `start_at`.
-- Recommended field: `id` (stable unique id).
+- Отслеживает YouTube-каналы, плейлисты и произвольные RSS-ленты.
+- Поддерживает режимы доставки: `immediate`, `digest`, `on_demand`.
+- Применяет фильтры по ключевым словам, regex, категориям и длительности.
+- Работает с событиями из JSON/ICS и с ручным вводом (`/addevents`).
+- Делает AI-суммаризацию:
+  - YouTube-видео (`/ai`)
+  - обычных веб-страниц (`/ai`)
+  - экспорт аудио (`/audio`)
+  - транскрипт в `.txt` (`/transcribe`, при необходимости через Whisper).
+- Имеет встроенный веб-интерфейс управления лентами.
 
-Example:
+## Как это работает
+
+Бот запускает polling Telegram + планировщик задач:
+
+1. Читает источники по расписанию.
+2. Сохраняет элементы в SQLite.
+3. Применяет правила фильтрации.
+4. Отправляет уведомления в Telegram согласно режиму ленты.
+
+Данные хранятся в SQLite (по умолчанию `data/bot.sqlite`).
+
+## Быстрый старт
+
+### 1) Требования
+
+- Python 3.9+
+- Telegram Bot Token
+- Для AI/Whisper: OpenAI API key
+- Для Whisper-потока: `yt-dlp` (или укажите путь в `AI_SUMMARIZER_WHISPER_YTDLP_BINARY`)
+
+### 2) Установка
+
+```bash
+git clone https://github.com/alexturg/unsubscribeme.git
+cd unsubscribeme
+pip install .
+```
+
+### 3) Настройка окружения
+
+```bash
+cp .env.example .env
+```
+
+Заполните минимум:
+
+```dotenv
+TELEGRAM_BOT_TOKEN=...
+ALLOWED_CHAT_IDS=123456789
+TZ=Asia/Almaty
+OPENAI_API_KEY=...   # если используете /ai, /audio, /transcribe с Whisper
+```
+
+### 4) Запуск
+
+```bash
+unsubscribeme
+```
+
+### 5) Первый вход
+
+1. Напишите боту `/start`.
+2. Добавьте источник через Telegram-команду или веб-интерфейс.
+3. Проверьте список лент командой `/list`.
+
+## Конфигурация `.env`
+
+### Обязательные переменные
+
+| Переменная | Описание |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Токен Telegram-бота |
+| `ALLOWED_CHAT_IDS` | Список разрешённых `chat_id` через запятую |
+
+### Базовые параметры
+
+| Переменная | По умолчанию | Описание |
+|---|---:|---|
+| `TZ` | `UTC` | Часовой пояс по умолчанию |
+| `DB_PATH` | `data/bot.sqlite` | Путь к SQLite БД |
+| `DEFAULT_POLL_INTERVAL_MIN` | `10` | Интервал опроса лент (мин) |
+| `DIGEST_DEFAULT_TIME` | `20:00` | Время дайджеста по умолчанию |
+| `BACKFILL_ON_START_N` | `10` | Backfill N последних записей на старте |
+| `HIDE_FUTURE_VIDEOS` | `false` | Скрывать видео с будущим временем публикации |
+| `WEB_HOST` | `127.0.0.1` | Хост встроенного веб-интерфейса |
+| `WEB_PORT` | `8080` | Порт встроенного веб-интерфейса |
+
+### AI и суммаризация
+
+| Переменная | По умолчанию | Описание |
+|---|---:|---|
+| `OPENAI_API_KEY` | `None` | Ключ OpenAI |
+| `AI_SUMMARIZER_MODE` | `openai` | Режим суммаризации: `openai` или `extractive` |
+| `AI_SUMMARIZER_OPENAI_MODEL` | `gpt-4.1-mini` | Модель OpenAI |
+| `AI_SUMMARIZER_LANGUAGES` | `ru,en` | Приоритет языков субтитров |
+| `AI_SUMMARIZER_MAX_SENTENCES` | `7` | Макс. число предложений в summary |
+| `AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS` | `0` | Лимит слов входа (`0` = без лимита) |
+| `AI_SUMMARIZER_SAVE_OUTPUT_FILES` | `false` | Сохранять артефакты summary на диск |
+| `AI_SUMMARIZER_TIMEOUT_SEC` | `600` | Таймаут суммаризации |
+| `AI_SUMMARIZER_OUTPUT_DIR` | `data/ai_summaries` | Папка для артефактов |
+
+### Веб-страницы в `/ai`
+
+| Переменная | По умолчанию | Описание |
+|---|---:|---|
+| `AI_SUMMARIZER_WEB_OPENAI_MAX_INPUT_WORDS` | `1400` | Бюджет слов для OpenAI по веб-страницам |
+| `AI_SUMMARIZER_WEB_FETCH_TIMEOUT_SEC` | `15` | Таймаут загрузки страницы |
+| `AI_SUMMARIZER_WEB_MAX_RESPONSE_BYTES` | `2000000` | Макс. размер загружаемой страницы |
+| `AI_SUMMARIZER_WEB_MAX_EXTRACTED_WORDS` | `4500` | Лимит слов после очистки HTML |
+
+### YouTube fallback + Whisper
+
+| Переменная | По умолчанию | Описание |
+|---|---:|---|
+| `AI_SUMMARIZER_YOUTUBE_CONTEXT_FETCH_TIMEOUT_SEC` | `15` | Таймаут загрузки YouTube-страницы |
+| `AI_SUMMARIZER_YOUTUBE_CONTEXT_MAX_HTML_BYTES` | `2500000` | Макс. размер HTML для fallback |
+| `AI_SUMMARIZER_YOUTUBE_CONTEXT_MAX_DESCRIPTION_WORDS` | `220` | Лимит слов описания |
+| `AI_SUMMARIZER_YOUTUBE_CONTEXT_MAX_COMMENTS` | `12` | Макс. комментариев |
+| `AI_SUMMARIZER_YOUTUBE_CONTEXT_MAX_COMMENT_WORDS` | `36` | Лимит слов на комментарий |
+| `AI_SUMMARIZER_YOUTUBE_CONTEXT_OPENAI_MAX_INPUT_WORDS` | `900` | Бюджет слов в fallback-суммаризации |
+| `AI_SUMMARIZER_WHISPER_MODEL` | `whisper-1` | Модель транскрипции |
+| `AI_SUMMARIZER_WHISPER_MAX_AUDIO_MB` | `24` | Лимит размера аудио для Whisper |
+| `AI_SUMMARIZER_WHISPER_DOWNLOAD_TIMEOUT_SEC` | `240` | Таймаут загрузки аудио |
+| `AI_SUMMARIZER_WHISPER_YTDLP_BINARY` | `yt-dlp` | Бинарник `yt-dlp` |
+| `AI_AUDIO_EXPORT_MAX_BYTES` | `50331648` | Лимит размера файла для `/audio` |
+
+## Режимы доставки
+
+- `immediate`  
+  Новые элементы отправляются сразу после обнаружения.
+- `digest`  
+  Элементы копятся и отправляются пачкой в заданное время (`digest_time_local`).
+- `on_demand`  
+  Элементы сохраняются, но не отправляются автоматически. Используйте `/digest <feed_id|all>`.
+
+## Команды Telegram
+
+| Команда | Формат | Назначение |
+|---|---|---|
+| `/start` | `/start` | Регистрация и ссылка на веб-интерфейс |
+| `/ai` | `/ai <youtube_url_or_video_id_or_page_url> [фокус]` | AI-суммаризация видео или веб-страницы |
+| `/audio` | `/audio <youtube_url_or_video_id>` | Экспорт аудио YouTube-видео |
+| `/transcribe` | `/transcribe <youtube_url_or_video_id>` | Транскрипт в `.txt` (с Whisper при необходимости) |
+| `/youtube` | `/youtube <youtube_link> [mode=...] [label=...] [interval=10] [time=HH:MM]` | Добавление YouTube-канала по ссылке |
+| `/channel` | `/channel <channel_id> [mode=...] [label=...] [interval=10] [time=HH:MM]` | Добавление канала по `channel_id` |
+| `/playlist` | `/playlist <playlist_id> [mode=...] [label=...] [interval=10] [time=HH:MM]` | Добавление плейлиста по `playlist_id` |
+| `/addfeed` | `/addfeed <url> [mode=...] [label=...] [interval=10] [time=HH:MM]` | Добавление RSS URL |
+| `/addeventsource` | `/addeventsource <url> [type=json\|ics] [label=...] [interval=1]` | Источник событий JSON/ICS |
+| `/addics` | `/addics <url> [label=...] [interval=1]` | Быстрое добавление ICS |
+| `/addevents` | `/addevents [feed=<id>\|<id>] [label=...] [interval=1]` + строки событий | Массовый импорт событий из текста |
+| `/list` | `/list` | Список лент |
+| `/remove` | `/remove <feed_id>` | Полное удаление ленты |
+| `/setmode` | `/setmode <feed_id> <mode> [HH:MM]` | Смена режима ленты |
+| `/setfilter` | `/setfilter <feed_id> <json>` | Установка фильтров |
+| `/digest` | `/digest <feed_id\|all>` | Ручной запуск дайджеста |
+| `/mute` | `/mute <feed_id>` | Временно отключить ленту |
+| `/unmute` | `/unmute <feed_id>` | Включить ленту обратно |
+
+Пример фильтра:
+
+```text
+/setfilter 1 {"include_keywords":["обзор"],"exclude_keywords":["стрим"]}
+```
+
+## Форматы источников событий
+
+### JSON (`/addeventsource ... type=json`)
+
+Допустимы:
+
+- массив событий `[]`
+- объект с полем `events: []`
+
+Обязательные поля события:
+
+- `title`
+- `link` или `url`
+- `start_at`
+
+Рекомендуется:
+
+- `id` (стабильный уникальный идентификатор)
+
+Пример:
+
 ```json
 {
   "events": [
@@ -64,27 +221,104 @@ Example:
 }
 ```
 
-ICS events source format:
-- Standard `.ics` calendar with `VEVENT`.
-- Event start time comes from `DTSTART` (`Z`, `TZID=...`, and `VALUE=DATE` are supported).
-- Event title comes from `SUMMARY`.
-- Event link uses `URL`, or first URL from `DESCRIPTION`, or falls back to the feed URL.
-- Recommended: stable `UID` for deduplication/upserts.
-- `webcal://` links are accepted and automatically normalized to `https://`.
+### ICS (`/addics` или `/addeventsource ... type=ics`)
 
-`/addevents` text format examples:
+- Поддерживается стандартный `.ics` с `VEVENT`.
+- Время старта: `DTSTART`.
+- Заголовок: `SUMMARY`.
+- Ссылка: `URL`, либо первая ссылка из `DESCRIPTION`, иначе URL самой ленты.
+- `webcal://` автоматически нормализуется в `https://`.
+
+### Ручной импорт (`/addevents`)
+
+Разделитель фиксированный: `;`
+
 ```text
 /addevents label=okko interval=1
 2026-02-10T19:30:00+03:00;Женщины. Короткая программа;https://okko.sport/...
 2026-02-10 21:00;Мужчины. Короткая программа;https://okko.sport/...
 ```
 
+## Веб-интерфейс
+
+После `/start` бот присылает ссылку вида:
+
 ```text
-/addevents feed=12
-2026-02-10T19:30:00+03:00;Женщины. Короткая программа;https://okko.sport/...
-2026-02-10T21:00:00+03:00;Мужчины. Короткая программа;https://okko.sport/...
+http://<WEB_HOST>:<WEB_PORT>/u/<chat_id>
 ```
 
-`/addevents` delimiter is fixed: `;`.
+Возможности UI:
 
-Architecture and detailed plan: `docs/telegram_youtube_rss_bot_architecture.md`.
+- Добавление/редактирование/отключение лент.
+- Просмотр последних элементов.
+- Настройка правил фильтрации.
+
+Важно:
+
+- доступ к странице основан на `chat_id` в URL;
+- не публикуйте ссылку и не открывайте UI наружу без реверс-прокси/ограничений доступа;
+- в продакшене задавайте безопасный сетевой контур (например, private network + VPN).
+
+## Запуск в Docker
+
+В проекте есть `Dockerfile`.
+
+Пример:
+
+```bash
+docker build -t unsubscribeme:latest .
+docker run --rm \
+  --name unsubscribeme \
+  --env-file .env \
+  -v "$(pwd)/data:/app/data" \
+  unsubscribeme:latest
+```
+
+## Тестирование
+
+```bash
+pip install .[test]
+pytest
+```
+
+## Диагностика
+
+- `Доступ запрещен.`  
+  Проверьте `ALLOWED_CHAT_IDS` и ваш реальный `chat_id`.
+- `/youtube` не смог определить `channel_id`  
+  Используйте `/channel <channel_id>` напрямую.
+- `/ai` или `/transcribe` не работают  
+  Проверьте `OPENAI_API_KEY` и доступность `yt-dlp` для Whisper-потока.
+- Веб-интерфейс не открывается  
+  Проверьте `WEB_HOST`/`WEB_PORT` и сетевую доступность хоста.
+- Бот не стартует после деплоя  
+  Смотрите логи: `journalctl -u unsubscribeme -f`.
+
+## Безопасность и приватность
+
+- Локальный `.env` не должен попадать в Git.
+- Рабочая БД `data/bot.sqlite` содержит пользовательские данные и не должна коммититься.
+- В репозитории хранится только демо-БД: `data/bot.demo.sqlite` (синтетические данные).
+- Перед публикацией форков/архивов проверяйте репозиторий на секреты и персональные данные.
+- Для `/ai` по веб-страницам запрещены приватные/локальные адреса; принимаются только `http/https`.
+
+## Структура проекта
+
+```text
+src/rssbot/            # Логика бота, scheduler, RSS, веб, AI
+src/utils/             # Вспомогательные утилиты
+tests/                 # Автотесты
+data/                  # Локальные данные SQLite (runtime)
+deploy/systemd/        # Unit-файл для systemd
+docs/                  # Дополнительная документация
+```
+
+## Документация
+
+- Архитектура: `docs/telegram_youtube_rss_bot_architecture.md`
+- Деплой через systemd: `docs/DEPLOY_SYSTEMD.md`
+- Unit-файл: `deploy/systemd/unsubscribeme.service`
+
+## Лицензия
+
+Проект распространяется под лицензией GNU GPLv3. См. файл `LICENSE`.
