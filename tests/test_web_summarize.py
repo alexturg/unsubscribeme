@@ -6,6 +6,8 @@ import pytest
 
 from rssbot.web_summarize import (
     _extract_text_from_reddit_json,
+    _extract_text_from_xml_feed,
+    _looks_like_reddit_access_block,
     _next_reddit_fallback_url,
     WebSummarizationError,
     extract_readable_text,
@@ -107,6 +109,27 @@ def test_next_reddit_fallback_url_switches_old_reddit_to_json():
     )
 
 
+def test_next_reddit_fallback_url_switches_json_to_rss():
+    url = (
+        "https://old.reddit.com/r/Ingress/comments/1rp5w63/"
+        "pausing_opr_and_retiring_overclock.json?sort=top&raw_json=1"
+    )
+    fallback = _next_reddit_fallback_url(url)
+    assert (
+        fallback
+        == "https://www.reddit.com/r/Ingress/comments/1rp5w63/pausing_opr_and_retiring_overclock/.rss"
+        "?sort=top&raw_json=1"
+    )
+
+
+def test_looks_like_reddit_access_block_detects_known_message():
+    blocked = """
+    You've been blocked by network security.
+    You are unable to access reddit.com.
+    """
+    assert _looks_like_reddit_access_block(blocked) is True
+
+
 def test_extract_text_from_reddit_json_collects_post_and_comments():
     payload = [
         {
@@ -156,6 +179,31 @@ def test_extract_text_from_reddit_json_collects_post_and_comments():
     assert "Post: Niantic announced that OPR will be paused." in cleaned
     assert "Comment 1: This will affect medal progress for many players." in cleaned
     assert "Comment 2: Hope this returns in a better form." in cleaned
+
+
+def test_extract_text_from_xml_feed_collects_entries():
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <title>Ingress discussion</title>
+      <entry>
+        <title>Pausing OPR and retiring Overclock</title>
+        <author><name>agent42</name></author>
+        <content>This will affect medal progress for many players.</content>
+      </entry>
+      <entry>
+        <title>Second thought</title>
+        <summary>Hope this returns in a better form.</summary>
+      </entry>
+    </feed>
+    """
+    title, cleaned = _extract_text_from_xml_feed(xml, max_words=200)
+
+    assert title == "Ingress discussion"
+    assert "Title: Ingress discussion" in cleaned
+    assert "Entry 1: Pausing OPR and retiring Overclock - by agent42." in cleaned
+    assert "This will affect medal progress for many players." in cleaned
+    assert "Entry 2: Second thought." in cleaned
+    assert "Hope this returns in a better form." in cleaned
 
 
 def test_fetch_webpage_content_reddit_403_fallbacks_to_old_and_json(monkeypatch):
@@ -242,3 +290,69 @@ def test_fetch_webpage_content_reddit_403_fallbacks_to_old_and_json(monkeypatch)
     assert page.source_url.endswith("pausing_opr_and_retiring_overclock.json?raw_json=1")
     assert "Subreddit: r/Ingress" in page.cleaned_text
     assert "Comment 1: This will affect medal progress for many players." in page.cleaned_text
+
+
+def test_fetch_webpage_content_reddit_403_fallbacks_to_rss(monkeypatch):
+    calls: list[str] = []
+    xml_payload = b"""<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <title>Ingress discussion</title>
+      <entry>
+        <title>Pausing OPR and retiring Overclock</title>
+        <summary>This will affect medal progress for many players.</summary>
+      </entry>
+    </feed>
+    """
+
+    class FakeResponse:
+        def __init__(self, url: str) -> None:
+            self._payload = xml_payload
+            self._offset = 0
+            self._url = url
+            self.headers = {"Content-Type": "application/atom+xml; charset=utf-8"}
+
+        def geturl(self) -> str:
+            return self._url
+
+        def read(self, n: int = -1) -> bytes:
+            if self._offset >= len(self._payload):
+                return b""
+            if n is None or n < 0:
+                n = len(self._payload) - self._offset
+            chunk = self._payload[self._offset : self._offset + n]
+            self._offset += len(chunk)
+            return chunk
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    class FakeOpener:
+        def open(self, request, timeout=None):
+            url = request.full_url
+            calls.append(url)
+            if len(calls) <= 3:
+                raise urllib.error.HTTPError(url, 403, "Forbidden", hdrs={}, fp=None)
+            return FakeResponse(url)
+
+    def fake_getaddrinfo(host, port, type=None):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+
+    monkeypatch.setattr(
+        "rssbot.web_summarize.urllib.request.build_opener",
+        lambda *_args, **_kwargs: FakeOpener(),
+    )
+    monkeypatch.setattr("rssbot.web_summarize.socket.getaddrinfo", fake_getaddrinfo)
+
+    page = fetch_webpage_content(
+        "https://www.reddit.com/r/Ingress/comments/1rp5w63/pausing_opr_and_retiring_overclock/"
+    )
+
+    assert calls[0].startswith("https://www.reddit.com/")
+    assert calls[1].startswith("https://old.reddit.com/")
+    assert ".json?raw_json=1" in calls[2]
+    assert calls[3].startswith("https://www.reddit.com/")
+    assert calls[3].endswith("/.rss?raw_json=1")
+    assert "Pausing OPR and retiring Overclock" in page.cleaned_text

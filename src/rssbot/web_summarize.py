@@ -9,6 +9,7 @@ import socket
 import urllib.error
 import urllib.request
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
+import xml.etree.ElementTree as ET
 
 
 SPACE_RE = re.compile(r"\s+")
@@ -20,6 +21,7 @@ DEFAULT_USER_AGENT = (
 )
 SUPPORTED_CONTENT_TYPES = {"text/html", "application/xhtml+xml", "text/plain"}
 REDIRECT_HTTP_CODES = {301, 302, 303, 307, 308}
+XML_CONTENT_TYPES = {"application/xml", "text/xml", "application/rss+xml", "application/atom+xml"}
 REDDIT_HOST_ALIASES = {
     "reddit.com",
     "www.reddit.com",
@@ -30,6 +32,12 @@ REDDIT_HOST_ALIASES = {
     "redd.it",
 }
 MAX_REDDIT_COMMENTS = 32
+REDDIT_BLOCK_PATTERNS = (
+    "you've been blocked by network security",
+    "you are unable to access reddit",
+    "this request has been blocked by our security service",
+    "whoa there, pardner",
+)
 NOISE_PATTERNS = (
     "accept all",
     "all rights reserved",
@@ -242,7 +250,22 @@ def _next_reddit_fallback_url(current_url: str) -> str | None:
         query_items.append(("raw_json", "1"))
         return urlunsplit((parsed.scheme, parsed.netloc, path, urlencode(query_items), ""))
 
+    normalized_path = path[:-5] if path.lower().endswith(".json") else path
+    if "/comments/" in normalized_path and not normalized_path.lower().endswith("/.rss"):
+        rss_path = normalized_path if normalized_path.endswith("/") else f"{normalized_path}/"
+        rss_path = f"{rss_path}.rss"
+        port = parsed.port
+        netloc = "www.reddit.com" if port is None else f"www.reddit.com:{port}"
+        return urlunsplit((parsed.scheme, netloc, rss_path, parsed.query, ""))
+
     return None
+
+
+def _looks_like_reddit_access_block(text: str) -> bool:
+    lowered = (text or "").lower()
+    if "reddit" not in lowered:
+        return False
+    return any(pattern in lowered for pattern in REDDIT_BLOCK_PATTERNS)
 
 
 def _is_public_ip(ip_text: str) -> bool:
@@ -465,6 +488,22 @@ def _extract_text_from_plaintext(raw_text: str, max_words: int) -> tuple[str, st
     return "", "\n".join(trimmed)
 
 
+def _xml_local_name(tag: str) -> str:
+    if "}" in tag:
+        return tag.rsplit("}", maxsplit=1)[1].lower()
+    return tag.lower()
+
+
+def _xml_first_child_text(node: ET.Element, names: set[str]) -> str:
+    for child in list(node):
+        if _xml_local_name(child.tag) not in names:
+            continue
+        text = _normalize_space(" ".join(part for part in child.itertext()))
+        if text:
+            return text
+    return ""
+
+
 def _reddit_listing_children(value: object) -> list[dict[str, object]]:
     if not isinstance(value, dict):
         return []
@@ -565,6 +604,54 @@ def _extract_text_from_reddit_json(raw_text: str, max_words: int) -> tuple[str, 
     return post_title, "\n".join(trimmed_lines)
 
 
+def _extract_text_from_xml_feed(raw_text: str, max_words: int) -> tuple[str, str]:
+    try:
+        root = ET.fromstring(raw_text)
+    except ET.ParseError as exc:
+        raise WebSummarizationError("Не удалось разобрать XML/RSS страницу.") from exc
+
+    root_name = _xml_local_name(root.tag)
+    container = root
+    if root_name == "rss":
+        for child in list(root):
+            if _xml_local_name(child.tag) == "channel":
+                container = child
+                break
+
+    title = _xml_first_child_text(container, {"title"})
+    lines: list[str] = []
+    if title:
+        lines.append(f"Title: {title}")
+
+    entry_nodes = [
+        node for node in container.iter() if _xml_local_name(node.tag) in {"entry", "item"}
+    ]
+    for idx, entry in enumerate(entry_nodes[: MAX_REDDIT_COMMENTS + 1], start=1):
+        entry_title = _xml_first_child_text(entry, {"title"})
+        entry_body = _xml_first_child_text(entry, {"content", "summary", "description"})
+        entry_author = _xml_first_child_text(entry, {"author", "creator", "name"})
+
+        parts: list[str] = []
+        if entry_title:
+            parts.append(entry_title)
+        if entry_author:
+            parts.append(f"by {entry_author}")
+        header = " - ".join(parts)
+        if header:
+            line = f"Entry {idx}: {header}"
+            if entry_body:
+                line = f"{line}. {entry_body}"
+        else:
+            line = entry_body
+        normalized = _normalize_space(line)
+        if normalized:
+            lines.append(normalized)
+
+    cleaned = _dedupe_and_filter_lines(lines)
+    trimmed = _limit_lines_by_words(cleaned, max_words=max_words)
+    return title, "\n".join(trimmed)
+
+
 def fetch_webpage_content(
     raw_url: str,
     *,
@@ -602,7 +689,15 @@ def fetch_webpage_content(
                 is_reddit_json = _is_reddit_host(final_parts.hostname) and (
                     content_type == "application/json" or final_parts.path.lower().endswith(".json")
                 )
-                if content_type and content_type not in SUPPORTED_CONTENT_TYPES and not is_reddit_json:
+                is_xml_feed = content_type in XML_CONTENT_TYPES or final_parts.path.lower().endswith(
+                    ".rss"
+                )
+                if (
+                    content_type
+                    and content_type not in SUPPORTED_CONTENT_TYPES
+                    and not is_reddit_json
+                    and not is_xml_feed
+                ):
                     raise WebSummarizationError(
                         f"Неподдерживаемый Content-Type: {content_type or 'unknown'}."
                     )
@@ -631,8 +726,19 @@ def fetch_webpage_content(
             ) from exc
 
         decoded = _decode_payload(payload, content_type_header)
+        if _looks_like_reddit_access_block(decoded):
+            reddit_fallback_url = _next_reddit_fallback_url(current_url)
+            if reddit_fallback_url:
+                current_url = reddit_fallback_url
+                continue
+            raise WebSummarizationError(
+                "Reddit ограничил доступ к странице с этого IP/сети. "
+                "Попробуйте другой IP/VPN или пришлите текст поста вручную."
+            )
         if is_reddit_json:
             title, cleaned_text = _extract_text_from_reddit_json(decoded, max_words=max_words)
+        elif is_xml_feed:
+            title, cleaned_text = _extract_text_from_xml_feed(decoded, max_words=max_words)
         elif content_type == "text/plain":
             title, cleaned_text = _extract_text_from_plaintext(decoded, max_words=max_words)
         else:
