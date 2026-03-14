@@ -3,18 +3,33 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html.parser import HTMLParser
 import ipaddress
+import json
 import re
 import socket
 import urllib.error
 import urllib.request
-from urllib.parse import quote, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
 
 SPACE_RE = re.compile(r"\s+")
 WORD_RE = re.compile(r"\b[\w'-]+\b", flags=re.UNICODE)
-DEFAULT_USER_AGENT = "UnsubscribeMeBot/0.1 (+https://example.invalid)"
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/123.0.0.0 Safari/537.36"
+)
 SUPPORTED_CONTENT_TYPES = {"text/html", "application/xhtml+xml", "text/plain"}
 REDIRECT_HTTP_CODES = {301, 302, 303, 307, 308}
+REDDIT_HOST_ALIASES = {
+    "reddit.com",
+    "www.reddit.com",
+    "old.reddit.com",
+    "new.reddit.com",
+    "m.reddit.com",
+    "np.reddit.com",
+    "redd.it",
+}
+MAX_REDDIT_COMMENTS = 32
 NOISE_PATTERNS = (
     "accept all",
     "all rights reserved",
@@ -179,6 +194,55 @@ def _normalize_space(text: str) -> str:
 
 def _word_count(text: str) -> int:
     return len(WORD_RE.findall(text))
+
+
+def _is_reddit_host(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    host = hostname.lower().rstrip(".")
+    return host in REDDIT_HOST_ALIASES or host.endswith(".reddit.com")
+
+
+def _normalize_reddit_subreddit(subreddit: str) -> str:
+    normalized = _normalize_space(subreddit)
+    if normalized.lower().startswith("r/"):
+        return normalized[2:].strip()
+    return normalized
+
+
+def _normalize_reddit_author(author: str) -> str:
+    normalized = _normalize_space(author)
+    if normalized.lower().startswith("u/"):
+        return normalized[2:].strip()
+    return normalized
+
+
+def _next_reddit_fallback_url(current_url: str) -> str | None:
+    parsed = urlsplit(current_url)
+    if not _is_reddit_host(parsed.hostname):
+        return None
+
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host != "old.reddit.com":
+        port = parsed.port
+        netloc = "old.reddit.com" if port is None else f"old.reddit.com:{port}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path or "/", parsed.query, ""))
+
+    path = parsed.path or "/"
+    query_items = parse_qsl(parsed.query, keep_blank_values=True)
+    has_raw_json = any(key.lower() == "raw_json" for key, _ in query_items)
+
+    if not path.lower().endswith(".json"):
+        json_path = "/.json" if path in {"", "/"} else f"{path.rstrip('/')}.json"
+        if not has_raw_json:
+            query_items.append(("raw_json", "1"))
+        return urlunsplit((parsed.scheme, parsed.netloc, json_path, urlencode(query_items), ""))
+
+    if not has_raw_json:
+        query_items.append(("raw_json", "1"))
+        return urlunsplit((parsed.scheme, parsed.netloc, path, urlencode(query_items), ""))
+
+    return None
 
 
 def _is_public_ip(ip_text: str) -> bool:
@@ -401,6 +465,106 @@ def _extract_text_from_plaintext(raw_text: str, max_words: int) -> tuple[str, st
     return "", "\n".join(trimmed)
 
 
+def _reddit_listing_children(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, dict):
+        return []
+    data = value.get("data")
+    if not isinstance(data, dict):
+        return []
+    children = data.get("children")
+    if not isinstance(children, list):
+        return []
+    return [child for child in children if isinstance(child, dict)]
+
+
+def _extract_reddit_post(value: object) -> tuple[str, str, str, str]:
+    for child in _reddit_listing_children(value):
+        payload = child.get("data")
+        if not isinstance(payload, dict):
+            continue
+        title = _normalize_space(str(payload.get("title") or ""))
+        body = _normalize_space(str(payload.get("selftext") or payload.get("body") or ""))
+        subreddit = _normalize_reddit_subreddit(str(payload.get("subreddit") or ""))
+        author = _normalize_reddit_author(str(payload.get("author") or ""))
+        if title or body or subreddit or author:
+            return title, body, subreddit, author
+    return "", "", "", ""
+
+
+def _collect_reddit_comment_bodies(value: object, out: list[str], max_items: int) -> None:
+    if len(out) >= max_items:
+        return
+
+    if isinstance(value, list):
+        for item in value:
+            _collect_reddit_comment_bodies(item, out, max_items)
+            if len(out) >= max_items:
+                return
+        return
+
+    if not isinstance(value, dict):
+        return
+
+    kind = str(value.get("kind") or "").lower()
+    payload = value.get("data")
+
+    if kind == "t1" and isinstance(payload, dict):
+        body = _normalize_space(str(payload.get("body") or ""))
+        if body:
+            out.append(body)
+            if len(out) >= max_items:
+                return
+        replies = payload.get("replies")
+        if isinstance(replies, (dict, list)):
+            _collect_reddit_comment_bodies(replies, out, max_items)
+        return
+
+    for child in _reddit_listing_children(value):
+        _collect_reddit_comment_bodies(child, out, max_items)
+        if len(out) >= max_items:
+            return
+
+
+def _extract_text_from_reddit_json(raw_text: str, max_words: int) -> tuple[str, str]:
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise WebSummarizationError("Не удалось разобрать JSON-представление Reddit.") from exc
+
+    post_title = ""
+    post_body = ""
+    subreddit = ""
+    author = ""
+    comments: list[str] = []
+
+    if isinstance(payload, list):
+        if payload:
+            post_title, post_body, subreddit, author = _extract_reddit_post(payload[0])
+        if len(payload) > 1:
+            _collect_reddit_comment_bodies(payload[1], comments, MAX_REDDIT_COMMENTS)
+    elif isinstance(payload, dict):
+        post_title, post_body, subreddit, author = _extract_reddit_post(payload)
+        _collect_reddit_comment_bodies(payload, comments, MAX_REDDIT_COMMENTS)
+    else:
+        raise WebSummarizationError("Неожиданный формат JSON от Reddit.")
+
+    lines: list[str] = []
+    if post_title:
+        lines.append(f"Title: {post_title}")
+    if subreddit:
+        lines.append(f"Subreddit: r/{subreddit}")
+    if author:
+        lines.append(f"Author: u/{author}")
+    if post_body:
+        lines.append(f"Post: {post_body}")
+    for idx, comment in enumerate(comments, start=1):
+        lines.append(f"Comment {idx}: {comment}")
+
+    cleaned_lines = _dedupe_and_filter_lines(lines)
+    trimmed_lines = _limit_lines_by_words(cleaned_lines, max_words=max_words)
+    return post_title, "\n".join(trimmed_lines)
+
+
 def fetch_webpage_content(
     raw_url: str,
     *,
@@ -432,14 +596,23 @@ def fetch_webpage_content(
         try:
             with opener.open(request, timeout=timeout_sec) as response:
                 final_url = validate_web_url_for_fetch(response.geturl() or current_url)
+                final_parts = urlsplit(final_url)
                 content_type_header = response.headers.get("Content-Type", "")
                 content_type = content_type_header.split(";", 1)[0].strip().lower()
-                if content_type and content_type not in SUPPORTED_CONTENT_TYPES:
+                is_reddit_json = _is_reddit_host(final_parts.hostname) and (
+                    content_type == "application/json" or final_parts.path.lower().endswith(".json")
+                )
+                if content_type and content_type not in SUPPORTED_CONTENT_TYPES and not is_reddit_json:
                     raise WebSummarizationError(
                         f"Неподдерживаемый Content-Type: {content_type or 'unknown'}."
                     )
                 payload = _read_limited(response, max_bytes=max_bytes)
         except urllib.error.HTTPError as exc:
+            if exc.code == 403:
+                reddit_fallback_url = _next_reddit_fallback_url(current_url)
+                if reddit_fallback_url:
+                    current_url = reddit_fallback_url
+                    continue
             if exc.code in REDIRECT_HTTP_CODES:
                 location = exc.headers.get("Location") if exc.headers else None
                 if not location:
@@ -458,7 +631,9 @@ def fetch_webpage_content(
             ) from exc
 
         decoded = _decode_payload(payload, content_type_header)
-        if content_type == "text/plain":
+        if is_reddit_json:
+            title, cleaned_text = _extract_text_from_reddit_json(decoded, max_words=max_words)
+        elif content_type == "text/plain":
             title, cleaned_text = _extract_text_from_plaintext(decoded, max_words=max_words)
         else:
             title, cleaned_text = extract_readable_text(decoded, max_words=max_words)
