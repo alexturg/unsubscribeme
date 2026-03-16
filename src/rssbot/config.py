@@ -127,6 +127,38 @@ class Settings(BaseSettings):
         default=Path("data/ai_summaries"),
         description="Directory for internal AI summarizer output files",
     )
+    AI_BULLSHIT_PROMPT_PATH: Path = Field(
+        default=Path("data/prompts/bullshit_detector_v2.txt"),
+        description="Path to system prompt template for /bullshit command",
+    )
+    AI_BULLSHIT_OPENAI_MODEL: str = Field(
+        default="gpt-4.1-mini",
+        description="OpenAI model for /bullshit intermediate summaries and final analysis",
+    )
+    AI_BULLSHIT_MAX_VIDEOS: int = Field(
+        default=15,
+        description="Default number of latest channel videos to scan in /bullshit",
+    )
+    AI_BULLSHIT_TOP_K: int = Field(
+        default=5,
+        description="Default suspicious videos selected for deep /bullshit analysis",
+    )
+    AI_BULLSHIT_FETCH_TIMEOUT_SEC: int = Field(
+        default=20,
+        description="Timeout for YouTube RSS fetch in /bullshit flow",
+    )
+    AI_BULLSHIT_SUMMARY_SENTENCES: int = Field(
+        default=10,
+        description="Number of bullet points for per-video summary in /bullshit flow",
+    )
+    AI_BULLSHIT_SUMMARY_MAX_INPUT_WORDS: int = Field(
+        default=1600,
+        description="OpenAI input budget for per-video summary in /bullshit flow",
+    )
+    AI_BULLSHIT_OPENAI_MAX_OUTPUT_TOKENS: int = Field(
+        default=2200,
+        description="OpenAI max output tokens for final /bullshit report",
+    )
 
     def allowed_chat_ids(self) -> Optional[List[int]]:
         if not self.ALLOWED_CHAT_IDS:

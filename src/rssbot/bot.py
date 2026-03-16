@@ -5,6 +5,7 @@ import hashlib
 from html import escape as html_escape
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,11 @@ from .ai_summarizer import (
     parse_ai_request_text,
     split_message_chunks,
     summarize_video,
+)
+from .bullshit_detector import (
+    BullshitDetectorError,
+    parse_bullshit_request_text,
+    run_bullshit_detector,
 )
 from .youtube_transcribe import (
     TranscriptError,
@@ -113,7 +119,7 @@ async def cmd_start(message: Message) -> None:
         "2) Проверь список: /list\n"
         "3) Настрой режим/фильтры: /setmode, /setfilter\n\n"
         "<b>События:</b> /addeventsource, /addics, /addevents\n"
-        "<b>AI:</b> /ai, /audio, /transcribe\n"
+        "<b>AI:</b> /ai, /audio, /transcribe, /bullshit\n"
         "<b>Управление:</b> /remove, /mute, /unmute, /digest"
     )
 
@@ -460,6 +466,7 @@ TRANSCRIPT_MISSING_MARKERS = (
     "requested transcript is not available",
     "no transcript",
 )
+YOUTUBE_CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
 
 
 def _format_timestamp(seconds: float) -> str:
@@ -475,6 +482,10 @@ def _parse_command_single_arg(raw_text: str, *, command_name: str) -> str:
     if len(parts) < 2 or not parts[1].strip():
         raise ValueError(f"Использование: /{command_name} <youtube_url_or_video_id>")
     return parts[1].strip().split(maxsplit=1)[0]
+
+
+def _looks_like_channel_id(value: str) -> bool:
+    return bool(YOUTUBE_CHANNEL_ID_RE.fullmatch((value or "").strip()))
 
 
 def _render_transcript_txt(segments: list[TranscriptSegment]) -> str:
@@ -885,6 +896,105 @@ async def cmd_ai(message: Message) -> None:
         )
 
     await _run_ai_summary(message.chat.id, request.video_url, request.custom_prompt, _send_text)
+
+
+def _bullshit_usage_text() -> str:
+    return (
+        "Использование: /bullshit <youtube_channel_url_or_channel_id> [videos=15] [top=5]\n"
+        "Примеры:\n"
+        "/bullshit https://www.youtube.com/@somechannel videos=20 top=5\n"
+        "/bullshit UC_x5XG1OV2P6uZZ5FSM9Ttw top=3"
+    )
+
+
+@router.message(Command("bullshit"))
+async def cmd_bullshit(message: Message) -> None:
+    user_id = _ensure_user_id(message)
+    if not user_id:
+        await message.answer(html_escape("Доступ запрещен.", quote=False))
+        return
+
+    default_max_videos = max(1, int(getattr(DEPS.settings, "AI_BULLSHIT_MAX_VIDEOS", 15)))
+    default_top_k = max(1, int(getattr(DEPS.settings, "AI_BULLSHIT_TOP_K", 5)))
+    try:
+        request = parse_bullshit_request_text(
+            message.text or "",
+            default_max_videos=default_max_videos,
+            default_top_k=default_top_k,
+        )
+    except ValueError as exc:
+        details = str(exc)
+        if details in {"bad_command"}:
+            details = _bullshit_usage_text()
+        await message.answer(html_escape(details, quote=False))
+        return
+
+    channel_ref = request.channel_ref
+    channel_id = channel_ref if _looks_like_channel_id(channel_ref) else None
+    if not channel_id:
+        await message.answer("Определяю channel_id...")
+        channel_id = await _extract_youtube_channel_id(channel_ref)
+    if not channel_id:
+        await message.answer(
+            html_escape(
+                "Не удалось определить channel_id.\n" + _bullshit_usage_text(),
+                quote=False,
+            )
+        )
+        return
+
+    await message.answer(
+        html_escape(
+            f"Собираю последние видео канала ({request.max_videos}) и выбираю top-{request.top_k} "
+            "подозрительных для проверки.",
+            quote=False,
+        )
+    )
+
+    try:
+        result = await run_bullshit_detector(
+            DEPS.settings,
+            channel_id=channel_id,
+            max_videos=request.max_videos,
+            top_k=request.top_k,
+        )
+    except BullshitDetectorError as exc:
+        await message.answer(html_escape(f"/bullshit не выполнен: {exc}", quote=False))
+        return
+    except Exception as exc:
+        logging.error(
+            "Unexpected /bullshit failure for chat_id=%s: %s",
+            message.chat.id,
+            exc,
+            exc_info=True,
+        )
+        await message.answer("Внутренняя ошибка при анализе /bullshit.")
+        return
+
+    selected_lines: list[str] = []
+    for idx, video in enumerate(result.analyzed_videos, start=1):
+        reason = "; ".join(video.suspicion_reasons[:2]) if video.suspicion_reasons else "нет сигналов"
+        selected_lines.append(f"{idx}. {video.title} ({video.suspicion_score}%) — {reason}")
+    if not selected_lines:
+        selected_lines.append("- Нет доступных видео для итогового анализа.")
+
+    skipped_line = ""
+    if result.skipped_videos:
+        skipped_line = f"\nПропущено видео из shortlist: {len(result.skipped_videos)}."
+
+    await message.answer(
+        html_escape(
+            f"Channel ID: {result.channel_id}\n"
+            f"Просканировано последних видео: {result.scanned_count}\n"
+            f"Отобрано в shortlist: {result.shortlisted_count}\n"
+            f"Проанализировано: {len(result.analyzed_videos)}{skipped_line}\n\n"
+            f"Shortlist:\n" + "\n".join(selected_lines),
+            quote=False,
+        )
+    )
+
+    for chunk in split_message_chunks(result.raw_analysis_text):
+        await message.answer(html_escape(chunk, quote=False))
 
 
 @router.callback_query(F.data.startswith("ai:item:"))
