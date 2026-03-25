@@ -191,11 +191,14 @@ def test_send_video_message_attaches_ai_callback_for_item():
     assert len(bot.messages) == 1
     _, _, reply_markup = bot.messages[0]
     assert isinstance(reply_markup, InlineKeyboardMarkup)
-    assert len(reply_markup.inline_keyboard) == 1
+    assert len(reply_markup.inline_keyboard) == 2
     assert len(reply_markup.inline_keyboard[0]) == 2
     assert reply_markup.inline_keyboard[0][0].text == "Открыть"
     assert reply_markup.inline_keyboard[0][1].text == "Сделать /ai"
     assert reply_markup.inline_keyboard[0][1].callback_data == "ai:item:42"
+    assert len(reply_markup.inline_keyboard[1]) == 1
+    assert reply_markup.inline_keyboard[1][0].text == "✓"
+    assert reply_markup.inline_keyboard[1][0].callback_data == "msg:viewed"
 
 
 def test_send_video_message_without_item_id_has_only_open_button():
@@ -217,9 +220,12 @@ def test_send_video_message_without_item_id_has_only_open_button():
     assert len(bot.messages) == 1
     _, _, reply_markup = bot.messages[0]
     assert isinstance(reply_markup, InlineKeyboardMarkup)
-    assert len(reply_markup.inline_keyboard) == 1
+    assert len(reply_markup.inline_keyboard) == 2
     assert len(reply_markup.inline_keyboard[0]) == 1
     assert reply_markup.inline_keyboard[0][0].text == "Открыть"
+    assert len(reply_markup.inline_keyboard[1]) == 1
+    assert reply_markup.inline_keyboard[1][0].text == "✓"
+    assert reply_markup.inline_keyboard[1][0].callback_data == "msg:viewed"
 
 
 def test_send_video_message_non_youtube_has_only_open_button():
@@ -241,6 +247,9 @@ def test_send_video_message_non_youtube_has_only_open_button():
     assert len(bot.messages) == 1
     _, _, reply_markup = bot.messages[0]
     assert isinstance(reply_markup, InlineKeyboardMarkup)
-    assert len(reply_markup.inline_keyboard) == 1
+    assert len(reply_markup.inline_keyboard) == 2
     assert len(reply_markup.inline_keyboard[0]) == 1
     assert reply_markup.inline_keyboard[0][0].text == "Открыть"
+    assert len(reply_markup.inline_keyboard[1]) == 1
+    assert reply_markup.inline_keyboard[1][0].text == "✓"
+    assert reply_markup.inline_keyboard[1][0].callback_data == "msg:viewed"

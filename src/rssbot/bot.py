@@ -458,6 +458,7 @@ def _format_feed_list_line(feed: Feed) -> str:
 
 
 TRANSCRIBE_WHISPER_CONFIRM_PREFIX = "transcribe:whisper:"
+MARK_SEEN_CALLBACK_DATA = "msg:viewed"
 TRANSCRIPT_MISSING_MARKERS = (
     "no transcripts were found",
     "transcriptsdisabled",
@@ -539,6 +540,21 @@ def _whisper_confirm_keyboard(video_id: str) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def _mark_seen_keyboard(
+    rows: Optional[list[list[InlineKeyboardButton]]] = None,
+) -> InlineKeyboardMarkup:
+    inline_rows = list(rows or [])
+    inline_rows.append(
+        [
+            InlineKeyboardButton(
+                text="✓",
+                callback_data=MARK_SEEN_CALLBACK_DATA,
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=inline_rows)
 
 
 async def _extract_youtube_channel_id(url: str) -> Optional[str]:
@@ -661,8 +677,8 @@ async def _run_ai_summary(
 
     response_text = f"{status_line}\nИсточник: {video_url}{focus_text}\n\n{result.summary_text}"
     if result.summary_basis == "metadata_comments" and result.video_id and not force_whisper:
-        whisper_kb = InlineKeyboardMarkup(
-            inline_keyboard=[
+        whisper_kb = _mark_seen_keyboard(
+            rows=[
                 [
                     InlineKeyboardButton(
                         text="Сделать транскрипцию через Whisper",
@@ -676,8 +692,9 @@ async def _run_ai_summary(
         await _cleanup_source_request_message()
         return
 
+    seen_kb = _mark_seen_keyboard()
     for chunk in split_message_chunks(response_text):
-        if await _safe_send(chunk) is None:
+        if await _safe_send(chunk, reply_markup=seen_kb) is None:
             return
 
     await _cleanup_source_request_message()
@@ -1059,6 +1076,31 @@ async def cmd_bullshit(message: Message) -> None:
 
     for chunk in split_message_chunks(result.raw_analysis_text):
         await message.answer(html_escape(chunk, quote=False))
+
+
+@router.callback_query(F.data == MARK_SEEN_CALLBACK_DATA)
+async def cb_mark_seen(callback: CallbackQuery) -> None:
+    message = callback.message
+    if message is None:
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+
+    chat_id = message.chat.id
+    if not _is_allowed(chat_id):
+        await callback.answer("Доступ запрещен.", show_alert=True)
+        return
+
+    try:
+        await message.delete()
+        await callback.answer("Удалено.")
+    except Exception as exc:
+        logging.debug(
+            "Failed to delete viewed message for chat_id=%s: %s",
+            chat_id,
+            exc,
+            exc_info=True,
+        )
+        await callback.answer("Не удалось удалить сообщение.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("ai:item:"))

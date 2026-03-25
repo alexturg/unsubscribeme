@@ -38,6 +38,20 @@ def _is_youtube_link(link: str) -> bool:
     )
 
 
+MARK_SEEN_CALLBACK_DATA = "msg:viewed"
+
+
+def _with_mark_seen_button(
+    rows: list[list[InlineKeyboardButton]],
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            *rows,
+            [InlineKeyboardButton(text="✓", callback_data=MARK_SEEN_CALLBACK_DATA)],
+        ]
+    )
+
+
 class BotScheduler:
     def __init__(self, bot: Bot) -> None:
         self.ctx = BotContext(bot=bot)
@@ -107,7 +121,7 @@ class BotScheduler:
         self, chat_id: int, title: str, link: str
     ) -> tuple[str, Optional[str]]:
         text = f"Старт трансляции: {title}"
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть", url=link)]])
+        kb = _with_mark_seen_button([[InlineKeyboardButton(text="Открыть", url=link)]])
         try:
             await self.ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
             return "ok", None
@@ -128,7 +142,7 @@ class BotScheduler:
         row = [InlineKeyboardButton(text="Открыть", url=link)]
         if item_id is not None and link and _is_youtube_link(link):
             row.append(InlineKeyboardButton(text="Сделать /ai", callback_data=f"ai:item:{item_id}"))
-        kb = InlineKeyboardMarkup(inline_keyboard=[row])
+        kb = _with_mark_seen_button([row])
         try:
             await self.ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
             return "ok", None

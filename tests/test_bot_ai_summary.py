@@ -14,6 +14,15 @@ class DummyMessage:
         self.deleted = True
 
 
+class DummyCallback:
+    def __init__(self, message) -> None:
+        self.message = message
+        self.answers: list[tuple[str, bool]] = []
+
+    async def answer(self, text: str, show_alert: bool = False) -> None:
+        self.answers.append((text, show_alert))
+
+
 def _make_send_text():
     sent: list[tuple[str, object, DummyMessage]] = []
 
@@ -58,6 +67,10 @@ def test_run_ai_summary_deletes_progress_message_on_success(monkeypatch):
     assert sent[0][2].deleted is True
     assert "Суммаризация готова." in sent[1][0]
     assert f"Источник: {video_url}" in sent[1][0]
+    summary_kb = sent[1][1]
+    assert summary_kb is not None
+    assert summary_kb.inline_keyboard[0][0].text == "✓"
+    assert summary_kb.inline_keyboard[0][0].callback_data == "msg:viewed"
     assert source_message.deleted is True
 
 
@@ -135,3 +148,67 @@ def test_run_ai_summary_parallel_requests_delete_only_own_source_messages(monkey
     assert len(sent_two) == 2
     assert source_one.deleted is True
     assert source_two.deleted is True
+
+
+def test_run_ai_summary_metadata_comments_keeps_whisper_and_seen_buttons(monkeypatch):
+    monkeypatch.setattr(bot_module, "DEPS", SimpleNamespace(settings=SimpleNamespace()))
+
+    async def _fake_summarize_video(*_args, **_kwargs):
+        return AiSummaryResult(
+            summary_text="- Preliminary summary",
+            summary_path=None,
+            transcript_path=None,
+            source_type="youtube",
+            summary_basis="metadata_comments",
+            video_id="dQw4w9WgXcQ",
+        )
+
+    monkeypatch.setattr(bot_module, "summarize_video", _fake_summarize_video)
+    sent, send_text = _make_send_text()
+    source_message = DummyMessage("/ai metadata")
+
+    asyncio.run(
+        bot_module._run_ai_summary(
+            chat_id=999,
+            video_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            custom_prompt=None,
+            send_text=send_text,
+            source_request_message=source_message,
+        )
+    )
+
+    assert len(sent) == 2
+    summary_kb = sent[1][1]
+    assert summary_kb is not None
+    assert summary_kb.inline_keyboard[0][0].text == "Сделать транскрипцию через Whisper"
+    assert summary_kb.inline_keyboard[0][0].callback_data == "ai:whisper:dQw4w9WgXcQ"
+    assert summary_kb.inline_keyboard[1][0].text == "✓"
+    assert summary_kb.inline_keyboard[1][0].callback_data == "msg:viewed"
+
+
+def test_cb_mark_seen_deletes_message(monkeypatch):
+    monkeypatch.setattr(bot_module, "_is_allowed", lambda _chat_id: True)
+    callback_message = DummyMessage("hello")
+    callback_message.chat = SimpleNamespace(id=123)
+    callback = DummyCallback(callback_message)
+
+    asyncio.run(bot_module.cb_mark_seen(callback))
+
+    assert callback_message.deleted is True
+    assert callback.answers == [("Удалено.", False)]
+
+
+def test_cb_mark_seen_reports_failure(monkeypatch):
+    monkeypatch.setattr(bot_module, "_is_allowed", lambda _chat_id: True)
+
+    class FailingMessage(DummyMessage):
+        async def delete(self) -> None:
+            raise RuntimeError("cannot delete")
+
+    callback_message = FailingMessage("hello")
+    callback_message.chat = SimpleNamespace(id=123)
+    callback = DummyCallback(callback_message)
+
+    asyncio.run(bot_module.cb_mark_seen(callback))
+
+    assert callback.answers == [("Не удалось удалить сообщение.", True)]
