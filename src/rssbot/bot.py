@@ -559,24 +559,45 @@ async def _run_ai_summary(
     chat_id: int,
     video_url: str,
     custom_prompt: Optional[str],
-    send_text: Callable[[str, Optional[InlineKeyboardMarkup]], Awaitable[None]],
+    send_text: Callable[[str, Optional[InlineKeyboardMarkup]], Awaitable[Optional[Message]]],
     *,
     force_whisper: bool = False,
 ) -> None:
-    async def _safe_send(text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> bool:
+    async def _safe_send(
+        text: str,
+        reply_markup: Optional[InlineKeyboardMarkup] = None,
+    ) -> Optional[Message]:
         try:
-            await send_text(text, reply_markup)
-            return True
+            return await send_text(text, reply_markup)
         except Exception as exc:
             logging.error("Failed to send /ai message to chat_id=%s: %s", chat_id, exc, exc_info=True)
-            return False
+            return None
+
+    progress_message: Optional[Message] = None
+
+    async def _cleanup_progress_message() -> None:
+        nonlocal progress_message
+        if progress_message is None:
+            return
+        try:
+            await progress_message.delete()
+        except Exception as exc:
+            logging.debug(
+                "Failed to delete /ai progress message for chat_id=%s: %s",
+                chat_id,
+                exc,
+                exc_info=True,
+            )
+        finally:
+            progress_message = None
 
     start_text = (
         "Запускаю транскрипцию видео через Whisper и суммаризацию. Это может занять 30-180 секунд."
         if force_whisper
         else "Запускаю суммаризацию контента. Это может занять 20-90 секунд."
     )
-    if not await _safe_send(start_text):
+    progress_message = await _safe_send(start_text)
+    if progress_message is None:
         return
 
     try:
@@ -588,12 +609,24 @@ async def _run_ai_summary(
             force_whisper=force_whisper,
         )
     except AiSummarizerError as exc:
-        await _safe_send(f"Не удалось сделать суммаризацию: {str(exc)}")
+        await _cleanup_progress_message()
+        await _safe_send(
+            "Не удалось сделать суммаризацию.\n"
+            f"Источник: {video_url}\n"
+            f"Ошибка: {str(exc)}"
+        )
         return
     except Exception as exc:
+        await _cleanup_progress_message()
         logging.error("Unexpected /ai failure for chat_id=%s: %s", chat_id, exc, exc_info=True)
-        await _safe_send("Внутренняя ошибка при суммаризации.")
+        await _safe_send(
+            "Не удалось сделать суммаризацию.\n"
+            f"Источник: {video_url}\n"
+            "Ошибка: внутренняя ошибка."
+        )
         return
+
+    await _cleanup_progress_message()
 
     focus_text = ""
     if custom_prompt:
@@ -624,7 +657,7 @@ async def _run_ai_summary(
         return
 
     for chunk in split_message_chunks(response_text):
-        if not await _safe_send(chunk):
+        if await _safe_send(chunk) is None:
             return
 
 
@@ -889,8 +922,11 @@ async def cmd_ai(message: Message) -> None:
         )
         return
 
-    async def _send_text(text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> None:
-        await message.answer(
+    async def _send_text(
+        text: str,
+        reply_markup: Optional[InlineKeyboardMarkup] = None,
+    ) -> Optional[Message]:
+        return await message.answer(
             html_escape(text, quote=False),
             reply_markup=reply_markup,
         )
@@ -1038,8 +1074,11 @@ async def cb_ai_item(callback: CallbackQuery) -> None:
 
     await callback.answer("Запускаю /ai...")
 
-    async def _send_text(text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> None:
-        await callback.bot.send_message(
+    async def _send_text(
+        text: str,
+        reply_markup: Optional[InlineKeyboardMarkup] = None,
+    ) -> Optional[Message]:
+        return await callback.bot.send_message(
             chat_id=chat_id,
             text=html_escape(text, quote=False),
             reply_markup=reply_markup,
@@ -1069,8 +1108,11 @@ async def cb_ai_whisper(callback: CallbackQuery) -> None:
 
     await callback.answer("Запускаю Whisper...")
 
-    async def _send_text(text: str, reply_markup: Optional[InlineKeyboardMarkup] = None) -> None:
-        await callback.bot.send_message(
+    async def _send_text(
+        text: str,
+        reply_markup: Optional[InlineKeyboardMarkup] = None,
+    ) -> Optional[Message]:
+        return await callback.bot.send_message(
             chat_id=chat_id,
             text=html_escape(text, quote=False),
             reply_markup=reply_markup,
