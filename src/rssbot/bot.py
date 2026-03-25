@@ -562,6 +562,7 @@ async def _run_ai_summary(
     send_text: Callable[[str, Optional[InlineKeyboardMarkup]], Awaitable[Optional[Message]]],
     *,
     force_whisper: bool = False,
+    source_request_message: Optional[Message] = None,
 ) -> None:
     async def _safe_send(
         text: str,
@@ -574,6 +575,7 @@ async def _run_ai_summary(
             return None
 
     progress_message: Optional[Message] = None
+    request_message = source_request_message
 
     async def _cleanup_progress_message() -> None:
         nonlocal progress_message
@@ -590,6 +592,22 @@ async def _run_ai_summary(
             )
         finally:
             progress_message = None
+
+    async def _cleanup_source_request_message() -> None:
+        nonlocal request_message
+        if request_message is None:
+            return
+        try:
+            await request_message.delete()
+        except Exception as exc:
+            logging.debug(
+                "Failed to delete /ai source message for chat_id=%s: %s",
+                chat_id,
+                exc,
+                exc_info=True,
+            )
+        finally:
+            request_message = None
 
     start_text = (
         "Запускаю транскрипцию видео через Whisper и суммаризацию. Это может занять 30-180 секунд."
@@ -653,12 +671,16 @@ async def _run_ai_summary(
                 ]
             ]
         )
-        await _safe_send(response_text, reply_markup=whisper_kb)
+        if await _safe_send(response_text, reply_markup=whisper_kb) is None:
+            return
+        await _cleanup_source_request_message()
         return
 
     for chunk in split_message_chunks(response_text):
         if await _safe_send(chunk) is None:
             return
+
+    await _cleanup_source_request_message()
 
 
 def _transcript_languages_from_settings() -> list[str]:
@@ -931,7 +953,13 @@ async def cmd_ai(message: Message) -> None:
             reply_markup=reply_markup,
         )
 
-    await _run_ai_summary(message.chat.id, request.video_url, request.custom_prompt, _send_text)
+    await _run_ai_summary(
+        message.chat.id,
+        request.video_url,
+        request.custom_prompt,
+        _send_text,
+        source_request_message=message,
+    )
 
 
 def _bullshit_usage_text() -> str:
