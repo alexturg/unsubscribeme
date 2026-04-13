@@ -19,6 +19,7 @@ from .youtube_transcribe import (
     WhisperTranscriptionError,
     extract_video_id,
     fetch_transcript,
+    transcript_options_from_settings,
     transcribe_video_with_whisper,
 )
 
@@ -60,6 +61,9 @@ TRANSCRIPT_MISSING_MARKERS = (
     "subtitles are disabled",
     "requested transcript is not available",
     "no transcript",
+    "requestblocked",
+    "ipblocked",
+    "youtube is blocking requests from your ip",
 )
 YOUTUBE_CONTEXT_SUMMARY_INSTRUCTION = (
     "Important: source text contains only video short description and viewer comments, "
@@ -277,7 +281,11 @@ def _summarize_sync(
     video_id = extract_video_id(video_url)
 
     try:
-        segments = fetch_transcript(video_id=video_id, languages=languages)
+        segments = fetch_transcript(
+            video_id=video_id,
+            languages=languages,
+            **transcript_options_from_settings(settings),
+        )
     except TranscriptError as exc:
         if not _transcript_error_means_missing_subtitles(exc):
             raise

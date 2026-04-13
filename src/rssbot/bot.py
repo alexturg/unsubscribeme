@@ -49,6 +49,7 @@ from .youtube_transcribe import (
     extract_video_id,
     fetch_transcript,
     fetch_video_info,
+    transcript_options_from_settings,
     transcribe_video_with_whisper,
 )
 from utils.yt_channel_id import get_channel_id
@@ -466,6 +467,9 @@ TRANSCRIPT_MISSING_MARKERS = (
     "subtitles are disabled",
     "requested transcript is not available",
     "no transcript",
+    "requestblocked",
+    "ipblocked",
+    "youtube is blocking requests from your ip",
 )
 YOUTUBE_CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
 
@@ -856,6 +860,7 @@ async def cmd_transcribe(message: Message) -> None:
             fetch_transcript,
             video_id=video_id,
             languages=_transcript_languages_from_settings(),
+            **transcript_options_from_settings(DEPS.settings),
         )
     except TranscriptError as exc:
         if not _looks_like_missing_subtitles_error(exc):

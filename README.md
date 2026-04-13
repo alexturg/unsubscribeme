@@ -119,6 +119,11 @@ unsubscribeme
 | `AI_SUMMARIZER_MODE` | `openai` | Режим суммаризации: `openai` или `extractive` |
 | `AI_SUMMARIZER_OPENAI_MODEL` | `gpt-4.1-mini` | Модель OpenAI |
 | `AI_SUMMARIZER_LANGUAGES` | `ru,en` | Приоритет языков субтитров |
+| `AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_URLS` | `` | Список прокси (через запятую/новые строки) для `youtube-transcript-api` |
+| `AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_LIST_URL` | `` | URL plain-text списка прокси (например `fresh-proxy-list/http.txt`) |
+| `AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_LIST_TIMEOUT_SEC` | `8` | Таймаут скачивания списка прокси |
+| `AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_MAX_TRIES` | `6` | Сколько прокси пробовать после неудачной прямой попытки |
+| `AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_REQUEST_TIMEOUT_SEC` | `8` | Таймаут одного HTTP-запроса к `youtube-transcript-api` |
 | `AI_SUMMARIZER_MAX_SENTENCES` | `7` | Макс. число предложений в summary |
 | `AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS` | `0` | Лимит слов входа (`0` = без лимита) |
 | `AI_SUMMARIZER_SAVE_OUTPUT_FILES` | `false` | Сохранять артефакты summary на диск |
@@ -157,6 +162,14 @@ unsubscribeme
 | `AI_SUMMARIZER_WHISPER_DOWNLOAD_TIMEOUT_SEC` | `240` | Таймаут загрузки аудио |
 | `AI_SUMMARIZER_WHISPER_YTDLP_BINARY` | `yt-dlp` | Бинарник `yt-dlp` |
 | `AI_AUDIO_EXPORT_MAX_BYTES` | `50331648` | Лимит размера файла для `/audio` |
+
+Пример для авто-ротации публичных HTTP-прокси:
+
+```env
+AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_LIST_URL=https://vakhov.github.io/fresh-proxy-list/http.txt
+AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_MAX_TRIES=2
+AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_REQUEST_TIMEOUT_SEC=6
+```
 
 ## Режимы доставки
 
@@ -299,6 +312,8 @@ pytest
   Используйте `/channel <channel_id>` напрямую.
 - `/ai` или `/transcribe` не работают  
   Проверьте `OPENAI_API_KEY` и доступность `yt-dlp` для Whisper-потока.
+- `RequestBlocked` / `IpBlocked` при субтитрах YouTube  
+  Включите ротацию прокси через `AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_LIST_URL` (или `..._PROXY_URLS`) и увеличьте `AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_MAX_TRIES`.
 - Веб-интерфейс не открывается  
   Проверьте `WEB_HOST`/`WEB_PORT` и сетевую доступность хоста.
 - Бот не стартует после деплоя  

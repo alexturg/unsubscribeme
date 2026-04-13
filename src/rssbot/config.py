@@ -8,7 +8,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=(".env",), env_prefix="", case_sensitive=False)
+    model_config = SettingsConfigDict(
+        env_file=(".env",),
+        env_prefix="",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
     TELEGRAM_BOT_TOKEN: str = Field(..., description="Telegram bot token")
     OPENAI_API_KEY: Optional[str] = Field(
@@ -55,6 +60,32 @@ class Settings(BaseSettings):
     AI_SUMMARIZER_LANGUAGES: str = Field(
         default="ru,en",
         description="Transcript language priority, comma-separated",
+    )
+    AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_URLS: str = Field(
+        default="",
+        description=(
+            "Optional comma/newline-separated proxy list for YouTube transcript fetch "
+            "(example: http://1.2.3.4:8080,http://5.6.7.8:3128)"
+        ),
+    )
+    AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_LIST_URL: str = Field(
+        default="",
+        description=(
+            "Optional HTTP/HTTPS URL to a plain-text proxy list (for example "
+            "https://vakhov.github.io/fresh-proxy-list/http.txt)"
+        ),
+    )
+    AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_LIST_TIMEOUT_SEC: int = Field(
+        default=8,
+        description="Timeout for downloading transcript proxy list URL",
+    )
+    AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_MAX_TRIES: int = Field(
+        default=6,
+        description="How many proxies to try after direct transcript request fails",
+    )
+    AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_REQUEST_TIMEOUT_SEC: int = Field(
+        default=8,
+        description="Per-request timeout for youtube-transcript-api HTTP calls",
     )
     AI_SUMMARIZER_MAX_SENTENCES: int = Field(default=7)
     AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS: int = Field(default=0)

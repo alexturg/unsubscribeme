@@ -298,6 +298,52 @@ def test_summarize_video_fallbacks_to_description_and_comments(monkeypatch, tmp_
     assert calls["kwargs"]["max_input_words"] == 900
 
 
+def test_summarize_video_fallbacks_to_context_on_request_blocked(monkeypatch, tmp_path):
+    settings = _settings(
+        tmp_path,
+        AI_SUMMARIZER_MODE="openai",
+        AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_LIST_URL="https://vakhov.github.io/fresh-proxy-list/http.txt",
+        AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_MAX_TRIES=9,
+    )
+    calls = {}
+
+    monkeypatch.setattr(ai_summarizer, "extract_video_id", lambda _: "dQw4w9WgXcQ")
+
+    def fake_fetch_transcript(**kwargs):
+        calls["fetch_kwargs"] = kwargs
+        raise ai_summarizer.TranscriptError(
+            "RequestBlocked: YouTube is blocking requests from your IP"
+        )
+
+    monkeypatch.setattr(ai_summarizer, "fetch_transcript", fake_fetch_transcript)
+    monkeypatch.setattr(
+        ai_summarizer,
+        "fetch_video_context",
+        lambda **_kwargs: VideoContext(
+            video_id="dQw4w9WgXcQ",
+            title="Video title",
+            short_description="Short description text",
+            comments=["first comment", "second comment"],
+            watch_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        ),
+    )
+    monkeypatch.setattr(ai_summarizer, "summarize_text_with_openai", lambda *_args, **_kwargs: "- Via fallback")
+
+    result = asyncio.run(
+        ai_summarizer.summarize_video(
+            settings,
+            chat_id=21,
+            video_url="https://youtu.be/dQw4w9WgXcQ",
+            custom_prompt=None,
+        )
+    )
+
+    assert result.summary_text == "- Via fallback"
+    assert result.summary_basis == "metadata_comments"
+    assert calls["fetch_kwargs"]["proxy_list_url"].startswith("https://vakhov.github.io")
+    assert calls["fetch_kwargs"]["proxy_max_tries"] == 9
+
+
 def test_summarize_video_force_whisper(monkeypatch, tmp_path):
     settings = _settings(tmp_path, AI_SUMMARIZER_MODE="openai")
     calls = {}

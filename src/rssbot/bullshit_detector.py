@@ -13,7 +13,12 @@ import feedparser
 
 from .config import Settings
 from .youtube_summarize import SummarizationError, summarize_text_with_openai
-from .youtube_transcribe import TranscriptError, TranscriptSegment, fetch_transcript
+from .youtube_transcribe import (
+    TranscriptError,
+    TranscriptSegment,
+    fetch_transcript,
+    transcript_options_from_settings,
+)
 
 
 class BullshitDetectorError(RuntimeError):
@@ -434,6 +439,7 @@ async def run_bullshit_detector(
                 fetch_transcript,
                 video_id=video.video_id,
                 languages=languages,
+                **transcript_options_from_settings(settings),
             )
         except TranscriptError as exc:
             skipped.append(
