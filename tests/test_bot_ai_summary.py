@@ -212,3 +212,11 @@ def test_cb_mark_seen_reports_failure(monkeypatch):
     asyncio.run(bot_module.cb_mark_seen(callback))
 
     assert callback.answers == [("Не удалось удалить сообщение.", True)]
+
+
+def test_looks_like_missing_subtitles_error_accepts_proxy_disconnect():
+    exc = bot_module.TranscriptError(
+        "Failed to fetch transcript. Details: ('Connection aborted.', "
+        "RemoteDisconnected('Remote end closed connection without response'))"
+    )
+    assert bot_module._looks_like_missing_subtitles_error(exc) is True

@@ -344,6 +344,46 @@ def test_summarize_video_fallbacks_to_context_on_request_blocked(monkeypatch, tm
     assert calls["fetch_kwargs"]["proxy_max_tries"] == 9
 
 
+def test_summarize_video_fallbacks_to_context_on_proxy_disconnect(monkeypatch, tmp_path):
+    settings = _settings(tmp_path, AI_SUMMARIZER_MODE="openai")
+
+    monkeypatch.setattr(ai_summarizer, "extract_video_id", lambda _: "dQw4w9WgXcQ")
+    monkeypatch.setattr(
+        ai_summarizer,
+        "fetch_transcript",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            ai_summarizer.TranscriptError(
+                "Failed to fetch transcript. Details: ('Connection aborted.', "
+                "RemoteDisconnected('Remote end closed connection without response'))"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        ai_summarizer,
+        "fetch_video_context",
+        lambda **_kwargs: VideoContext(
+            video_id="dQw4w9WgXcQ",
+            title="Video title",
+            short_description="Short description text",
+            comments=["first comment", "second comment"],
+            watch_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        ),
+    )
+    monkeypatch.setattr(ai_summarizer, "summarize_text_with_openai", lambda *_args, **_kwargs: "- Via fallback")
+
+    result = asyncio.run(
+        ai_summarizer.summarize_video(
+            settings,
+            chat_id=22,
+            video_url="https://youtu.be/dQw4w9WgXcQ",
+            custom_prompt=None,
+        )
+    )
+
+    assert result.summary_text == "- Via fallback"
+    assert result.summary_basis == "metadata_comments"
+
+
 def test_summarize_video_force_whisper(monkeypatch, tmp_path):
     settings = _settings(tmp_path, AI_SUMMARIZER_MODE="openai")
     calls = {}

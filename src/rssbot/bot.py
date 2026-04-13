@@ -470,6 +470,17 @@ TRANSCRIPT_MISSING_MARKERS = (
     "requestblocked",
     "ipblocked",
     "youtube is blocking requests from your ip",
+    "connection aborted",
+    "remotedisconnected",
+    "proxyerror",
+    "unable to connect to proxy",
+    "max retries exceeded with url",
+    "tunnel connection failed",
+    "httpsconnectionpool",
+    "connection reset by peer",
+    "read timed out",
+    "connect timeout",
+    "timed out",
 )
 YOUTUBE_CHANNEL_ID_RE = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
 

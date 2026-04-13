@@ -64,6 +64,17 @@ TRANSCRIPT_MISSING_MARKERS = (
     "requestblocked",
     "ipblocked",
     "youtube is blocking requests from your ip",
+    "connection aborted",
+    "remotedisconnected",
+    "proxyerror",
+    "unable to connect to proxy",
+    "max retries exceeded with url",
+    "tunnel connection failed",
+    "httpsconnectionpool",
+    "connection reset by peer",
+    "read timed out",
+    "connect timeout",
+    "timed out",
 )
 YOUTUBE_CONTEXT_SUMMARY_INSTRUCTION = (
     "Important: source text contains only video short description and viewer comments, "
