@@ -366,29 +366,37 @@ async def fetch_and_store_event_source(feed_id: int) -> List[int]:
     if not events:
         return []
 
-    created_ids: list[int] = []
+    created_items: list[Item] = []
     with session_scope() as s:
         f = s.get(Feed, feed_id)
+        # Calendar feeds can contain thousands of events. Load the feed's items
+        # once instead of issuing one or two SELECTs for every event on every poll.
+        existing_items = s.query(Item).filter(Item.feed_id == f.id).order_by(Item.id).all()
+        by_external_id = {item.external_id: item for item in existing_items}
+        by_summary_hash = (
+            {item.summary_hash: item for item in reversed(existing_items) if item.summary_hash}
+            if feed_type == "event_ics"
+            else {}
+        )
         for event in events:
             event_summary_hash = event_identity_hash(event["title"], event["published_at"])
-            existing = (
-                s.query(Item)
-                .filter(Item.feed_id == f.id, Item.external_id == event["external_id"])
-                .first()
-            )
+            existing = by_external_id.get(event["external_id"])
             # Some ICS providers mutate UID between polls for the same event.
             # Fall back to a stable event fingerprint to avoid duplicate items.
             if not existing and feed_type == "event_ics":
-                existing = (
-                    s.query(Item)
-                    .filter(Item.feed_id == f.id, Item.summary_hash == event_summary_hash)
-                    .first()
-                )
+                existing = by_summary_hash.get(event_summary_hash)
             if existing:
-                existing.title = event["title"]
-                existing.link = event["link"]
-                existing.published_at = event["published_at"]
-                existing.summary_hash = event_summary_hash
+                if existing.title != event["title"]:
+                    existing.title = event["title"]
+                if existing.link != event["link"]:
+                    existing.link = event["link"]
+                stored_start = (
+                    existing.published_at.replace(tzinfo=None) if existing.published_at else None
+                )
+                if stored_start != event["published_at"].replace(tzinfo=None):
+                    existing.published_at = event["published_at"]
+                if existing.summary_hash != event_summary_hash:
+                    existing.summary_hash = event_summary_hash
                 continue
             it = Item(
                 feed_id=f.id,
@@ -400,8 +408,13 @@ async def fetch_and_store_event_source(feed_id: int) -> List[int]:
                 summary_hash=event_summary_hash,
             )
             s.add(it)
+            created_items.append(it)
+            by_external_id[it.external_id] = it
+            if feed_type == "event_ics":
+                by_summary_hash.setdefault(event_summary_hash, it)
+        if created_items:
             s.flush()
-            created_ids.append(it.id)
+        created_ids = [item.id for item in created_items]
     return created_ids
 
 

@@ -2,6 +2,8 @@ import asyncio
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import event as sqlalchemy_event
+
 from rssbot.db import init_engine, session_scope, User, Feed, Item
 from rssbot.rss import (
     _extract_video_id,
@@ -302,6 +304,56 @@ def test_fetch_and_store_event_source_ics_mutating_uid_and_link_does_not_duplica
         assert items[0].title == "ICS Event One"
         assert items[0].link == "https://example.com/ics/1?token=2"
         assert items[0].published_at == datetime(2026, 2, 10, 16, 30)
+
+
+def test_ics_repoll_uses_bounded_queries_and_does_not_rewrite_unchanged_items(monkeypatch, tmp_path):
+    engine = init_engine(tmp_path / "bot.sqlite")
+    with session_scope() as s:
+        user = User(chat_id=890, tz="UTC")
+        s.add(user)
+        s.flush()
+        feed = Feed(
+            user_id=user.id,
+            url="https://example/events.ics",
+            type="event_ics",
+            enabled=True,
+            mode="immediate",
+        )
+        s.add(feed)
+        s.flush()
+        feed_id = feed.id
+
+    payload = (
+        "BEGIN:VCALENDAR\r\n"
+        + "".join(
+            f"BEGIN:VEVENT\r\nUID:evt-{i}\r\nDTSTART:20260210T163000Z\r\n"
+            f"SUMMARY:Event {i}\r\nURL:https://example.com/{i}\r\nEND:VEVENT\r\n"
+            for i in range(100)
+        )
+        + "END:VCALENDAR\r\n"
+    ).encode("utf-8")
+
+    async def fake_fetch_http(feed):
+        return 200, None, None, payload
+
+    from rssbot import rss as rss_mod
+
+    monkeypatch.setattr(rss_mod, "fetch_feed_http", fake_fetch_http)
+    assert len(asyncio.run(fetch_and_store_event_source(feed_id))) == 100
+
+    statements = []
+
+    def record_statement(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement.upper())
+
+    sqlalchemy_event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        assert asyncio.run(fetch_and_store_event_source(feed_id)) == []
+    finally:
+        sqlalchemy_event.remove(engine, "before_cursor_execute", record_statement)
+
+    assert sum(sql.startswith("SELECT") for sql in statements) <= 5
+    assert not any(sql.startswith("UPDATE ITEMS") for sql in statements)
 
 
 def test_compute_available_at_normalizes_naive_datetime():

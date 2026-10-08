@@ -242,7 +242,7 @@ class BotScheduler:
                 baseline.baseline_published_at if baseline else None
             )
             due_query = (
-                s.query(Item.id)
+                s.query(Item.id, Item.title, Item.published_at)
                 .filter(
                     Item.feed_id == feed_id,
                     Item.published_at.isnot(None),
@@ -253,7 +253,7 @@ class BotScheduler:
             if baseline_published_at is not None:
                 due_query = due_query.filter(Item.published_at > baseline_published_at)
 
-            due_item_ids = [row[0] for row in due_query.all()]
+            due_items = due_query.all()
             user_id = user.id
             delivered_event_keys: set[str] = set()
             delivered_rows = (
@@ -275,7 +275,13 @@ class BotScheduler:
                 delivered_event_keys.add(event_identity_hash(str(title_raw or ""), published_at))
 
         sent = 0
-        for item_id in due_item_ids:
+        for item_id, title, published_raw in due_items:
+            published_at = _to_utc_aware(published_raw)
+            if not published_at:
+                continue
+            event_key = event_identity_hash(title or "", published_at)
+            if event_key in delivered_event_keys:
+                continue
             with session_scope() as s:
                 item = s.get(Item, item_id)
                 if not item:
