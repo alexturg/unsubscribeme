@@ -403,6 +403,7 @@ def _summarize_web_sync(
         timeout_sec=fetch_timeout,
         max_bytes=fetch_max_bytes,
         max_words=fetch_max_words,
+        cache_dir=settings.AI_SUMMARIZER_OUTPUT_DIR / "web_cache",
     )
     source_text = page.cleaned_text
 

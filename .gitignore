@@ -215,3 +215,4 @@ __marimo__/
 data/bot.sqlite
 data/bot.sqlite-shm
 data/bot.sqlite-wal
+data/ai_summaries/web_cache/

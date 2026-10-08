@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from html.parser import HTMLParser
+import hashlib
 import ipaddress
 import json
 import logging
+import os
+from pathlib import Path
 import re
 import socket
 import threading
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -150,6 +154,68 @@ def _cache_reddit_content(key, page: WebPageContent) -> None:
         if len(_REDDIT_CONTENT_CACHE) >= 64:
             _REDDIT_CONTENT_CACHE.pop(next(iter(_REDDIT_CONTENT_CACHE)))
         _REDDIT_CONTENT_CACHE[key] = (time.monotonic(), page)
+
+
+def _reddit_cache_path(key, cache_dir: Path) -> Path:
+    digest = hashlib.sha256(json.dumps(key).encode("utf-8")).hexdigest()
+    return cache_dir / f"{digest}.json"
+
+
+def _read_reddit_disk_cache(key, cache_dir: Path | None, *, allow_stale: bool = False):
+    if key is None or cache_dir is None:
+        return None
+    try:
+        path = _reddit_cache_path(key, cache_dir)
+        if path.stat().st_size > key[-3] * 2 + 10_000:
+            return None
+        entry = json.loads(path.read_text(encoding="utf-8"))
+        age = time.time() - float(entry["fetched_at"])
+        if age < 0 or age >= (86400 if allow_stale else 300):
+            return None
+        page = WebPageContent(**entry["page"])
+        if not all(isinstance(value, str) for value in (page.source_url, page.title, page.cleaned_text)):
+            return None
+        if not page.cleaned_text.strip():
+            return None
+        if age >= 300:
+            page = WebPageContent(
+                source_url=page.source_url,
+                title=page.title,
+                cleaned_text=(
+                    "Source note: Reddit is temporarily unavailable. This text was retrieved "
+                    "from a cache less than 24 hours old; newer comments may be missing.\n"
+                    + page.cleaned_text
+                ),
+            )
+        return page
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _write_reddit_disk_cache(key, page: WebPageContent, cache_dir: Path | None) -> None:
+    if key is None or cache_dir is None:
+        return
+    temporary_path = None
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "fetched_at": time.time(),
+            "page": {"source_url": page.source_url, "title": page.title, "cleaned_text": page.cleaned_text},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=cache_dir, delete=False) as stream:
+            temporary_path = Path(stream.name)
+            json.dump(payload, stream, ensure_ascii=False)
+        os.replace(temporary_path, _reddit_cache_path(key, cache_dir))
+        for path in sorted(cache_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[128:]:
+            path.unlink(missing_ok=True)
+    except OSError:
+        logging.warning("Could not save Reddit source cache", exc_info=True)
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -754,6 +820,7 @@ def fetch_webpage_content(
     max_redirects: int = 4,
     max_words: int = 4500,
     user_agent: str = DEFAULT_USER_AGENT,
+    cache_dir: Path | None = None,
 ) -> WebPageContent:
     if timeout_sec < 1:
         raise WebSummarizationError("timeout_sec must be >= 1")
@@ -775,8 +842,9 @@ def fetch_webpage_content(
         current_url = validate_web_url_for_fetch(current_url)
         cache_key = _reddit_content_cache_key(current_url, max_bytes, max_words, user_agent)
         cached_page = _cached_reddit_content(cache_key)
+        if cached_page is None:
+            cached_page = _read_reddit_disk_cache(cache_key, cache_dir)
         if cached_page is not None:
-            _cache_reddit_content(original_cache_key, cached_page)
             return cached_page
         request = urllib.request.Request(current_url, headers=request_headers, method="GET")
 
@@ -842,6 +910,12 @@ def fetch_webpage_content(
                 current_url = _reddit_redirect_url(current_url, location)
                 continue
             logging.warning("Web fetch failed: HTTP %s for %s", exc.code, current_url)
+            if exc.code in {403, 429}:
+                for key in (original_cache_key, cache_key):
+                    saved_page = _read_reddit_disk_cache(key, cache_dir, allow_stale=True)
+                    if saved_page is not None:
+                        logging.warning("Using saved Reddit text after HTTP %s", exc.code)
+                        return saved_page
             raise WebSummarizationError(
                 f"Не удалось загрузить страницу: HTTP {exc.code}."
             ) from exc
@@ -876,6 +950,10 @@ def fetch_webpage_content(
             )
         page = WebPageContent(source_url=final_url, title=title, cleaned_text=cleaned_text)
         _cache_reddit_content(original_cache_key, page)
+        _write_reddit_disk_cache(original_cache_key, page, cache_dir)
+        final_cache_key = _reddit_content_cache_key(final_url, max_bytes, max_words, user_agent)
+        if final_cache_key != original_cache_key:
+            _write_reddit_disk_cache(final_cache_key, page, cache_dir)
         _cache_reddit_content(
             _reddit_content_cache_key(final_url, max_bytes, max_words, user_agent), page
         )

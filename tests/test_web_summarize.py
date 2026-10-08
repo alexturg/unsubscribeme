@@ -7,12 +7,16 @@ import pytest
 
 from rssbot.web_summarize import (
     _REDDIT_CONTENT_CACHE,
+    _reddit_content_cache_key,
+    _write_reddit_disk_cache,
     _extract_text_from_reddit_json,
     _extract_text_from_xml_feed,
     _looks_like_reddit_access_block,
     _next_reddit_fallback_url,
     _open_web_request,
     WebSummarizationError,
+    WebPageContent,
+    DEFAULT_USER_AGENT,
     extract_readable_text,
     fetch_webpage_content,
     normalize_web_url,
@@ -147,7 +151,7 @@ def test_reddit_rate_limit_retry_is_bounded(monkeypatch, retry_after, expected_c
 
 
 @pytest.mark.parametrize("share_get_status", [301, 403, 429])
-def test_fetch_webpage_content_resolves_reddit_share_url(monkeypatch, share_get_status):
+def test_fetch_webpage_content_resolves_reddit_share_url(monkeypatch, tmp_path, share_get_status):
     share_url = "https://www.reddit.com/r/Ingress/s/BGHThr4vvc"
     canonical_url = (
         "https://www.reddit.com/r/Ingress/comments/1x0qg70/"
@@ -200,7 +204,7 @@ def test_fetch_webpage_content_resolves_reddit_share_url(monkeypatch, share_get_
     monkeypatch.setattr("rssbot.web_summarize.socket.getaddrinfo", fake_getaddrinfo)
     monkeypatch.setattr("rssbot.web_summarize.time.sleep", lambda _delay: None)
 
-    page = fetch_webpage_content(share_url)
+    page = fetch_webpage_content(share_url, cache_dir=tmp_path)
 
     assert page.source_url == canonical_url
     assert "Agent account discussion." in page.cleaned_text
@@ -210,6 +214,43 @@ def test_fetch_webpage_content_resolves_reddit_share_url(monkeypatch, share_get_
     assert fetch_webpage_content(canonical_url) == page
     assert fetch_webpage_content(share_url) == page
     assert len(calls) == request_count
+    _REDDIT_CONTENT_CACHE.clear()
+    assert fetch_webpage_content(canonical_url, cache_dir=tmp_path) == page
+    assert fetch_webpage_content(share_url, cache_dir=tmp_path) == page
+    assert len(calls) == request_count
+
+
+@pytest.mark.parametrize("age", [0, 600, 90000])
+def test_reddit_disk_cache_survives_restart_and_handles_rate_limit(monkeypatch, tmp_path, age):
+    url = "https://www.reddit.com/r/Ingress/comments/abc/post/"
+    page = WebPageContent(url, "Post title", "Actual post text and comments.")
+    key = _reddit_content_cache_key(url, 2_000_000, 4500, DEFAULT_USER_AGENT)
+    _write_reddit_disk_cache(key, page, tmp_path)
+    _REDDIT_CONTENT_CACHE.clear()
+    import time
+    now = time.time()
+    monkeypatch.setattr("rssbot.web_summarize.time.time", lambda: now + age)
+    monkeypatch.setattr("rssbot.web_summarize.time.sleep", lambda _delay: None)
+    monkeypatch.setattr(
+        "rssbot.web_summarize.socket.getaddrinfo",
+        lambda host, port, type=None: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))],
+    )
+    calls = []
+
+    class BlockedOpener:
+        def open(self, request, timeout=None):
+            calls.append(request.full_url)
+            raise urllib.error.HTTPError(request.full_url, 429, "Limited", {}, None)
+
+    monkeypatch.setattr("rssbot.web_summarize.urllib.request.build_opener", lambda *_: BlockedOpener())
+    if age >= 86400:
+        with pytest.raises(WebSummarizationError, match="429"):
+            fetch_webpage_content(url, cache_dir=tmp_path)
+    else:
+        result = fetch_webpage_content(url, cache_dir=tmp_path)
+        assert page.cleaned_text in result.cleaned_text
+        assert bool(calls) == (age >= 300)
+        assert ("newer comments may be missing" in result.cleaned_text) == (age >= 300)
 
 
 def test_next_reddit_fallback_url_switches_old_reddit_to_json():
