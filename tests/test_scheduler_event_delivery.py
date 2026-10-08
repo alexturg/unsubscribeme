@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta
+from unittest.mock import AsyncMock, Mock
 
 from aiogram.types import InlineKeyboardMarkup
 from rssbot.db import Delivery, Feed, FeedBaseline, Item, User, init_engine, session_scope
@@ -13,6 +14,62 @@ class DummyBot:
     async def send_message(self, chat_id: int, text: str, reply_markup=None):
         self.messages.append((chat_id, text, reply_markup))
         return {"ok": True}
+
+
+def test_ics_fetches_hourly_while_start_delivery_runs_each_minute(tmp_path):
+    init_engine(tmp_path / "bot.sqlite")
+    with session_scope() as s:
+        user = User(chat_id=12345, tz="UTC")
+        s.add(user)
+        s.flush()
+        feed = Feed(
+            user_id=user.id,
+            url="https://example.com/calendar.ics",
+            type="event_ics",
+            enabled=True,
+            poll_interval_min=1,
+        )
+        s.add(feed)
+        s.flush()
+        feed_id = feed.id
+
+    scheduler = BotScheduler(bot=DummyBot())
+    scheduler.scheduler = Mock()
+    scheduler.schedule_feed_poll(feed_id, 1)
+
+    jobs = {call.kwargs["id"]: call.kwargs for call in scheduler.scheduler.add_job.call_args_list}
+    assert jobs[f"poll:{feed_id}"]["minutes"] == 60
+    assert jobs[f"event-start:{feed_id}"]["minutes"] == 1
+    with session_scope() as s:
+        assert s.get(Feed, feed_id).poll_interval_min == 60
+
+    scheduler.unschedule_feed_poll(feed_id)
+    removed = {call.args[0] for call in scheduler.scheduler.remove_job.call_args_list}
+    assert removed == {f"poll:{feed_id}", f"event-start:{feed_id}"}
+
+
+def test_ics_poll_does_not_run_start_delivery(monkeypatch, tmp_path):
+    init_engine(tmp_path / "bot.sqlite")
+    with session_scope() as s:
+        user = User(chat_id=12347, tz="UTC")
+        s.add(user)
+        s.flush()
+        feed = Feed(user_id=user.id, url="https://example.com/calendar.ics", type="event_ics")
+        s.add(feed)
+        s.flush()
+        feed_id = feed.id
+
+    from rssbot import scheduler as scheduler_mod
+
+    fetch = AsyncMock(return_value=[])
+    monkeypatch.setattr(scheduler_mod, "fetch_and_store_event_source", fetch)
+    scheduler = BotScheduler(bot=DummyBot())
+    deliver = AsyncMock(return_value=0)
+    monkeypatch.setattr(scheduler, "_deliver_due_event_starts", deliver)
+
+    asyncio.run(scheduler._poll_feed_job(feed_id))
+    fetch.assert_awaited_once_with(feed_id)
+    deliver.assert_not_awaited()
 
 
 def test_deliver_due_event_starts_sets_baseline_and_skips_historical_on_first_run(tmp_path):

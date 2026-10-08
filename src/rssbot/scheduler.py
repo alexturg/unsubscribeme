@@ -67,27 +67,47 @@ class BotScheduler:
 
     def schedule_feed_poll(self, feed_id: int, interval_min: int) -> None:
         job_id = f"poll:{feed_id}"
+        delivery_job_id = f"event-start:{feed_id}"
+        with session_scope() as s:
+            feed = s.get(Feed, feed_id)
+            if not feed or not feed.enabled:
+                return
+            is_ics = (feed.type or "").strip().lower() == "event_ics"
+            poll_interval = max(60, interval_min) if is_ics else max(1, interval_min)
+            if is_ics and feed.poll_interval_min != poll_interval:
+                feed.poll_interval_min = poll_interval
         # Replace existing job if present
-        try:
-            self.scheduler.remove_job(job_id)
-        except Exception:
-            pass
+        for old_job_id in (job_id, delivery_job_id):
+            try:
+                self.scheduler.remove_job(old_job_id)
+            except Exception:
+                pass
         self.scheduler.add_job(
             self._poll_feed_job,
             trigger="interval",
-            minutes=max(1, interval_min),
+            minutes=poll_interval,
             id=job_id,
             args=[feed_id],
             coalesce=True,
             max_instances=1,
         )
+        if is_ics:
+            self.scheduler.add_job(
+                self._deliver_due_event_starts,
+                trigger="interval",
+                minutes=1,
+                id=delivery_job_id,
+                args=[feed_id],
+                coalesce=True,
+                max_instances=1,
+            )
 
     def unschedule_feed_poll(self, feed_id: int) -> None:
-        job_id = f"poll:{feed_id}"
-        try:
-            self.scheduler.remove_job(job_id)
-        except Exception:
-            pass
+        for job_id in (f"poll:{feed_id}", f"event-start:{feed_id}"):
+            try:
+                self.scheduler.remove_job(job_id)
+            except Exception:
+                pass
 
     async def _poll_feed_job(self, feed_id: int) -> None:
         with session_scope() as s:
@@ -100,7 +120,8 @@ class BotScheduler:
             try:
                 if feed_type in {"event_json", "event_ics"}:
                     await fetch_and_store_event_source(feed_id)
-                await self._deliver_due_event_starts(feed_id)
+                if feed_type != "event_ics":
+                    await self._deliver_due_event_starts(feed_id)
             except Exception:
                 return
             return

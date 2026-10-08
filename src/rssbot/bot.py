@@ -230,6 +230,8 @@ async def _create_event_source_feed_reply(
     normalized_type = source_type.strip().lower()
     if normalized_type not in {"event_json", "event_ics"}:
         normalized_type = "event_json"
+    if normalized_type == "event_ics":
+        interval = max(60, interval)
     removed = _dedupe_user_feeds(user_id)
 
     with session_scope() as s:
@@ -1457,7 +1459,7 @@ async def cmd_addeventsource(message: Message) -> None:
 async def cmd_addics(message: Message) -> None:
     """Добавить источник событий в формате ICS.
 
-    Формат: /addics <url> [label=...] [interval=1]
+    Формат: /addics <url> [label=...] [interval=60]
     """
     user_id = _ensure_user_id(message)
     if not user_id:
@@ -1465,11 +1467,11 @@ async def cmd_addics(message: Message) -> None:
         return
     parts = (message.text or "").split()
     if len(parts) < 2:
-        await message.answer("Использование: /addics <url> [label=...] [interval=1]")
+        await message.answer("Использование: /addics <url> [label=...] [interval=60]")
         return
     url = parts[1]
     label = None
-    interval = 1
+    interval = 60
     for a in parts[2:]:
         if a.startswith("label="):
             label = a.split("=", 1)[1]
