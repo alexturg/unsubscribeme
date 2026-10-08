@@ -96,6 +96,69 @@ def test_next_reddit_fallback_url_prefers_old_reddit_host():
     )
 
 
+def test_next_reddit_fallback_url_does_not_rewrite_share_path():
+    assert _next_reddit_fallback_url("https://www.reddit.com/r/Ingress/s/BGHThr4vvc") is None
+
+
+@pytest.mark.parametrize("share_get_status", [301, 403])
+def test_fetch_webpage_content_resolves_reddit_share_url(monkeypatch, share_get_status):
+    share_url = "https://www.reddit.com/r/Ingress/s/BGHThr4vvc"
+    canonical_url = (
+        "https://www.reddit.com/r/Ingress/comments/1x0qg70/"
+        "whats_the_deal_with_a_passed_agents_account/"
+    )
+    redirect_url = canonical_url + "?share_id=abc&utm_source=share"
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+
+        def __init__(self, url):
+            self.url = url
+            self.payload = b"<html><title>Ingress post</title><article>Agent account discussion.</article></html>"
+
+        def geturl(self):
+            return self.url
+
+        def read(self, n=-1):
+            payload, self.payload = self.payload[:n], self.payload[n:]
+            return payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class FakeOpener:
+        def open(self, request, timeout=None):
+            calls.append((request.get_method(), request.full_url))
+            if request.full_url == share_url:
+                if request.get_method() == "HEAD" or share_get_status == 301:
+                    raise urllib.error.HTTPError(
+                        share_url, 301, "Moved", hdrs={"Location": redirect_url}, fp=None
+                    )
+                raise urllib.error.HTTPError(share_url, 403, "Forbidden", hdrs={}, fp=None)
+            assert request.full_url == canonical_url
+            return FakeResponse(canonical_url)
+
+    def fake_getaddrinfo(host, port, type=None):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+
+    monkeypatch.setattr(
+        "rssbot.web_summarize.urllib.request.build_opener",
+        lambda *_args, **_kwargs: FakeOpener(),
+    )
+    monkeypatch.setattr("rssbot.web_summarize.socket.getaddrinfo", fake_getaddrinfo)
+
+    page = fetch_webpage_content(share_url)
+
+    assert page.source_url == canonical_url
+    assert "Agent account discussion." in page.cleaned_text
+    assert calls[-1] == ("GET", canonical_url)
+    assert all("old.reddit.com" not in url for _, url in calls)
+
+
 def test_next_reddit_fallback_url_switches_old_reddit_to_json():
     url = (
         "https://old.reddit.com/r/Ingress/comments/1rp5w63/"

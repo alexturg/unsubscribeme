@@ -225,9 +225,30 @@ def _normalize_reddit_author(author: str) -> str:
     return normalized
 
 
+def _is_reddit_share_url(url: str) -> bool:
+    parsed = urlsplit(url)
+    return bool(
+        _is_reddit_host(parsed.hostname)
+        and re.fullmatch(r"/r/[^/]+/s/[^/]+/?", parsed.path, flags=re.IGNORECASE)
+    )
+
+
+def _reddit_redirect_url(current_url: str, location: str) -> str:
+    target = urljoin(current_url, location)
+    parsed = urlsplit(target)
+    # Reddit share links add tracking parameters to the canonical post URL.
+    # Fetching that URL without them also matches the working direct-link path.
+    if _is_reddit_share_url(current_url) and _is_reddit_host(parsed.hostname):
+        if re.match(r"/r/[^/]+/comments/[^/]+(?:/|$)", parsed.path, flags=re.IGNORECASE):
+            return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    return target
+
+
 def _next_reddit_fallback_url(current_url: str) -> str | None:
     parsed = urlsplit(current_url)
     if not _is_reddit_host(parsed.hostname):
+        return None
+    if _is_reddit_share_url(current_url):
         return None
 
     host = (parsed.hostname or "").lower().rstrip(".")
@@ -704,6 +725,26 @@ def fetch_webpage_content(
                 payload = _read_limited(response, max_bytes=max_bytes)
         except urllib.error.HTTPError as exc:
             if exc.code == 403:
+                if _is_reddit_share_url(current_url):
+                    # Some Reddit edges reject GET /s/... while still exposing its
+                    # canonical post in the HEAD redirect.
+                    head_request = urllib.request.Request(
+                        current_url, headers=request_headers, method="HEAD"
+                    )
+                    try:
+                        with opener.open(head_request, timeout=timeout_sec) as head_response:
+                            head_location = head_response.headers.get("Location")
+                    except urllib.error.HTTPError as head_exc:
+                        head_location = (
+                            head_exc.headers.get("Location")
+                            if head_exc.code in REDIRECT_HTTP_CODES and head_exc.headers
+                            else None
+                        )
+                    except urllib.error.URLError:
+                        head_location = None
+                    if head_location:
+                        current_url = _reddit_redirect_url(current_url, head_location)
+                        continue
                 reddit_fallback_url = _next_reddit_fallback_url(current_url)
                 if reddit_fallback_url:
                     current_url = reddit_fallback_url
@@ -714,7 +755,7 @@ def fetch_webpage_content(
                     raise WebSummarizationError(
                         f"Редирект без Location (HTTP {exc.code})."
                     ) from exc
-                current_url = urljoin(current_url, location)
+                current_url = _reddit_redirect_url(current_url, location)
                 continue
             raise WebSummarizationError(
                 f"Не удалось загрузить страницу: HTTP {exc.code}."
