@@ -70,6 +70,31 @@ def create_ai_card(chat_id: int, title: str, link: str, body: str) -> int:
         return card.id
 
 
+def ensure_link_card(chat_id: int, message_id: int, link: str) -> int:
+    """Create one card per submitted message, preserving its link for Someday."""
+    with session_scope() as session:
+        user = session.query(User).filter(User.chat_id == chat_id).first()
+        if user is None:
+            raise ValueError("Card user not found")
+        source_key = f"link:{message_id}"
+        card = (
+            session.query(CardEntry)
+            .filter(CardEntry.user_id == user.id, CardEntry.source_key == source_key)
+            .first()
+        )
+        if card is None:
+            card = CardEntry(
+                user_id=user.id,
+                source_key=source_key,
+                kind="link",
+                title=link[:500],
+                link=link,
+            )
+            session.add(card)
+            session.flush()
+        return card.id
+
+
 def register_card_message(card_id: int, chat_id: int, message_id: int | None) -> None:
     if message_id is None:
         return

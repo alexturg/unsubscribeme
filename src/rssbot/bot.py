@@ -33,6 +33,7 @@ from .cards import (
     choice_keyboard,
     choose_card,
     create_ai_card,
+    ensure_link_card,
     get_someday_page,
     register_card_message,
     start_someday_view,
@@ -127,6 +128,7 @@ async def cmd_start(message: Message) -> None:
         f"<b>Веб-интерфейс:</b> {web_link}\n\n"
         "<b>Быстрый старт:</b>\n"
         "1) Добавь источник: /youtube, /channel, /playlist или /addfeed\n"
+        "   Или просто отправь ссылку, чтобы сохранить её карточкой.\n"
         "2) Проверь список: /list\n"
         "3) Настрой режим/фильтры: /setmode, /setfilter\n\n"
         "<b>События:</b> /addeventsource, /addics, /addevents\n"
@@ -510,6 +512,33 @@ def _parse_command_single_arg(raw_text: str, *, command_name: str) -> str:
     if len(parts) < 2 or not parts[1].strip():
         raise ValueError(f"Использование: /{command_name} <youtube_url_or_video_id>")
     return parts[1].strip().split(maxsplit=1)[0]
+
+
+def _single_http_link(raw_text: str) -> Optional[str]:
+    value = (raw_text or "").strip()
+    if not value or any(char.isspace() for char in value) or len(value) > 1000:
+        return None
+    try:
+        parsed = urlparse(value)
+        host = parsed.hostname
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not host:
+        return None
+    return value
+
+
+def _is_youtube_video_link(link: str) -> bool:
+    host = (urlparse(link).hostname or "").lower()
+    if host not in {"youtube.com", "youtu.be", "youtube-nocookie.com"} and not host.endswith(
+        (".youtube.com", ".youtube-nocookie.com")
+    ):
+        return False
+    try:
+        extract_video_id(link)
+        return True
+    except ValueError:
+        return False
 
 
 def _looks_like_channel_id(value: str) -> bool:
@@ -1347,6 +1376,39 @@ async def cb_ai_item(callback: CallbackQuery) -> None:
     await _run_ai_summary(chat_id, video_url, None, _send_text)
 
 
+@router.callback_query(F.data.startswith("ai:link:"))
+async def cb_ai_link(callback: CallbackQuery) -> None:
+    message = callback.message
+    if message is None or not _is_allowed(message.chat.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    try:
+        card_id = int((callback.data or "").split(":", 2)[2])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    with session_scope() as session:
+        user = session.query(User).filter(User.chat_id == message.chat.id).first()
+        card = session.get(CardEntry, card_id)
+        link = card.link if user and card and card.user_id == user.id and card.kind == "link" else None
+    if not link or not _is_youtube_video_link(link):
+        await callback.answer("Запись недоступна.", show_alert=True)
+        return
+    await callback.answer("Запускаю /ai...")
+
+    async def _send_text(
+        text: str,
+        reply_markup: Optional[InlineKeyboardMarkup] = None,
+    ) -> Optional[Message]:
+        return await callback.bot.send_message(
+            chat_id=message.chat.id,
+            text=html_escape(text, quote=False),
+            reply_markup=reply_markup,
+        )
+
+    await _run_ai_summary(message.chat.id, link, None, _send_text)
+
+
 @router.callback_query(F.data.startswith("ai:whisper:"))
 async def cb_ai_whisper(callback: CallbackQuery) -> None:
     message = callback.message
@@ -2115,3 +2177,32 @@ async def cmd_unmute(message: Message) -> None:
 
 
 # Removed dedupe command; duplicates are handled on add
+
+
+@router.message(F.text)
+async def cmd_plain_link(message: Message) -> None:
+    """Turn a message containing only one HTTP(S) URL into a saved card."""
+    link = _single_http_link(message.text or "")
+    if link is None:
+        return
+    user_id = _ensure_user_id(message)
+    if user_id is None:
+        await message.answer("Доступ запрещён.")
+        return
+    card_id = ensure_link_card(message.chat.id, message.message_id, link)
+    row = [InlineKeyboardButton(text="Открыть", url=link)]
+    if _is_youtube_video_link(link):
+        row.append(InlineKeyboardButton(text="Сделать /ai", callback_data=f"ai:link:{card_id}"))
+    try:
+        sent = await message.answer(
+            f"Ссылка: {html_escape(link, quote=False)}",
+            reply_markup=choice_keyboard(card_id, [row]),
+        )
+    except Exception as exc:
+        logging.warning("Could not create link card for chat_id=%s: %s", message.chat.id, exc)
+        return
+    register_card_message(card_id, message.chat.id, getattr(sent, "message_id", None))
+    try:
+        await message.delete()
+    except Exception as exc:
+        logging.debug("Could not delete original link message for chat_id=%s: %s", message.chat.id, exc)
