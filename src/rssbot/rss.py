@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import calendar
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 import re
@@ -12,7 +12,7 @@ import re
 import aiohttp
 import feedparser
 
-from .db import Feed, Item, session_scope
+from .db import Feed, IcsContentState, Item, session_scope
 from .config import Settings
 
 
@@ -237,6 +237,8 @@ def _normalized_ics_event_rows(
     content: bytes,
     default_tz: ZoneInfo,
     fallback_link: Optional[str] = None,
+    *,
+    not_before: Optional[datetime] = None,
 ) -> List[dict[str, Any]]:
     text = content.decode("utf-8-sig", errors="replace")
     lines = _unfold_ics_lines(text)
@@ -254,6 +256,9 @@ def _normalized_ics_event_rows(
             title = str(event.get("summary") or "").strip()
             start_at = event.get("start_at")
             if not isinstance(start_at, datetime):
+                continue
+            if not_before is not None and start_at < not_before:
+                event = None
                 continue
             if not title:
                 title = "Событие"
@@ -353,25 +358,61 @@ async def fetch_and_store_event_source(feed_id: int) -> List[int]:
         return []
 
     settings = Settings()
-    default_tz = ZoneInfo(settings.TZ or "UTC")
+    timezone_name = settings.TZ or "UTC"
+    default_tz = ZoneInfo(timezone_name)
     events: list[dict[str, Any]]
+    content_sha256: Optional[str] = None
     if feed_type == "event_ics":
-        events = _normalized_ics_event_rows(content, default_tz, fallback_link=feed.url)
+        content_sha256 = hashlib.sha256(content).hexdigest()
+        with session_scope() as s:
+            state = s.get(IcsContentState, feed_id)
+            if (
+                state
+                and state.content_sha256 == content_sha256
+                and state.source_url == feed.url
+                and state.timezone_name == timezone_name
+            ):
+                return []
+        # Keep recently started events for polls delayed by an outage.
+        not_before = datetime.now(timezone.utc) - timedelta(days=1)
+        events = _normalized_ics_event_rows(
+            content, default_tz, fallback_link=feed.url, not_before=not_before
+        )
     else:
         try:
             payload = json.loads(content.decode("utf-8"))
         except Exception:
             return []
         events = _normalized_event_rows(payload, default_tz)
-    if not events:
+    if not events and content_sha256 is None:
         return []
 
     created_items: list[Item] = []
     with session_scope() as s:
         f = s.get(Feed, feed_id)
+        if content_sha256 is not None:
+            state = s.get(IcsContentState, feed_id)
+            if state is None:
+                s.add(
+                    IcsContentState(
+                        feed_id=feed_id,
+                        content_sha256=content_sha256,
+                        source_url=f.url,
+                        timezone_name=timezone_name,
+                    )
+                )
+            else:
+                state.content_sha256 = content_sha256
+                state.source_url = f.url
+                state.timezone_name = timezone_name
+        if not events:
+            return []
         # Calendar feeds can contain thousands of events. Load the feed's items
         # once instead of issuing one or two SELECTs for every event on every poll.
-        existing_items = s.query(Item).filter(Item.feed_id == f.id).order_by(Item.id).all()
+        existing_query = s.query(Item).filter(Item.feed_id == f.id)
+        if feed_type == "event_ics":
+            existing_query = existing_query.filter(Item.published_at >= not_before)
+        existing_items = existing_query.order_by(Item.id).all()
         by_external_id = {item.external_id: item for item in existing_items}
         by_summary_hash = (
             {item.summary_hash: item for item in reversed(existing_items) if item.summary_hash}

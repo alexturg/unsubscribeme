@@ -139,6 +139,15 @@ class FeedBaseline(Base):
     feed: Mapped[Feed] = relationship("Feed")
 
 
+class IcsContentState(Base):
+    __tablename__ = "ics_content_states"
+
+    feed_id: Mapped[int] = mapped_column(ForeignKey("feeds.id"), primary_key=True)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    timezone_name: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
 _SessionLocal: Optional[sessionmaker[Session]] = None
 _engine: Optional[Engine] = None
 

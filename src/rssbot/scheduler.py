@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -252,11 +252,13 @@ class BotScheduler:
             )
             if baseline_published_at is not None:
                 due_query = due_query.filter(Item.published_at > baseline_published_at)
+            if feed_type == "event_ics":
+                due_query = due_query.filter(Item.published_at >= now_utc - timedelta(days=1))
 
             due_items = due_query.all()
             user_id = user.id
             delivered_event_keys: set[str] = set()
-            delivered_rows = (
+            delivered_query = (
                 s.query(Item.title, Item.published_at)
                 .join(Delivery, Delivery.item_id == Item.id)
                 .filter(
@@ -266,8 +268,12 @@ class BotScheduler:
                     Item.feed_id == feed_id,
                     Item.published_at.isnot(None),
                 )
-                .all()
             )
+            if feed_type == "event_ics":
+                delivered_query = delivered_query.filter(
+                    Item.published_at >= now_utc - timedelta(days=1)
+                )
+            delivered_rows = delivered_query.all()
             for title_raw, published_raw in delivered_rows:
                 published_at = _to_utc_aware(published_raw)
                 if not published_at:

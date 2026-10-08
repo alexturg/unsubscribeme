@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import event as sqlalchemy_event
@@ -211,12 +211,13 @@ def test_fetch_and_store_event_source_ics(monkeypatch, tmp_path):
         s.flush()
         feed_id = feed.id
 
+    start_at = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0)
     payload = (
         "BEGIN:VCALENDAR\r\n"
         "VERSION:2.0\r\n"
         "BEGIN:VEVENT\r\n"
         "UID:ics-evt-1\r\n"
-        "DTSTART:20260210T163000Z\r\n"
+        f"DTSTART:{start_at:%Y%m%dT%H%M%SZ}\r\n"
         "SUMMARY:ICS Event One\r\n"
         "URL:https://example.com/ics/1\r\n"
         "END:VEVENT\r\n"
@@ -239,7 +240,7 @@ def test_fetch_and_store_event_source_ics(monkeypatch, tmp_path):
         assert items[0].external_id == "ics-evt-1"
         assert items[0].title == "ICS Event One"
         assert items[0].link == "https://example.com/ics/1"
-        assert items[0].published_at == datetime(2026, 2, 10, 16, 30)
+        assert items[0].published_at == start_at.replace(tzinfo=None)
 
 
 def test_fetch_and_store_event_source_ics_mutating_uid_and_link_does_not_duplicate(monkeypatch, tmp_path):
@@ -262,12 +263,13 @@ def test_fetch_and_store_event_source_ics_mutating_uid_and_link_does_not_duplica
         s.flush()
         feed_id = feed.id
 
+    start_at = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0)
     payload_1 = (
         "BEGIN:VCALENDAR\r\n"
         "VERSION:2.0\r\n"
         "BEGIN:VEVENT\r\n"
         "UID:ics-evt-a\r\n"
-        "DTSTART:20260210T163000Z\r\n"
+        f"DTSTART:{start_at:%Y%m%dT%H%M%SZ}\r\n"
         "SUMMARY:ICS Event One\r\n"
         "URL:https://example.com/ics/1\r\n"
         "END:VEVENT\r\n"
@@ -278,7 +280,7 @@ def test_fetch_and_store_event_source_ics_mutating_uid_and_link_does_not_duplica
         "VERSION:2.0\r\n"
         "BEGIN:VEVENT\r\n"
         "UID:ics-evt-b\r\n"
-        "DTSTART:20260210T163000Z\r\n"
+        f"DTSTART:{start_at:%Y%m%dT%H%M%SZ}\r\n"
         "SUMMARY:ICS Event One\r\n"
         "URL:https://example.com/ics/1?token=2\r\n"
         "END:VEVENT\r\n"
@@ -303,7 +305,7 @@ def test_fetch_and_store_event_source_ics_mutating_uid_and_link_does_not_duplica
         assert len(items) == 1
         assert items[0].title == "ICS Event One"
         assert items[0].link == "https://example.com/ics/1?token=2"
-        assert items[0].published_at == datetime(2026, 2, 10, 16, 30)
+        assert items[0].published_at == start_at.replace(tzinfo=None)
 
 
 def test_ics_repoll_uses_bounded_queries_and_does_not_rewrite_unchanged_items(monkeypatch, tmp_path):
@@ -323,10 +325,11 @@ def test_ics_repoll_uses_bounded_queries_and_does_not_rewrite_unchanged_items(mo
         s.flush()
         feed_id = feed.id
 
+    start_at = datetime.now(timezone.utc) + timedelta(days=1)
     payload = (
         "BEGIN:VCALENDAR\r\n"
         + "".join(
-            f"BEGIN:VEVENT\r\nUID:evt-{i}\r\nDTSTART:20260210T163000Z\r\n"
+            f"BEGIN:VEVENT\r\nUID:evt-{i}\r\nDTSTART:{start_at:%Y%m%dT%H%M%SZ}\r\n"
             f"SUMMARY:Event {i}\r\nURL:https://example.com/{i}\r\nEND:VEVENT\r\n"
             for i in range(100)
         )
@@ -354,6 +357,65 @@ def test_ics_repoll_uses_bounded_queries_and_does_not_rewrite_unchanged_items(mo
 
     assert sum(sql.startswith("SELECT") for sql in statements) <= 5
     assert not any(sql.startswith("UPDATE ITEMS") for sql in statements)
+
+
+def test_ics_keeps_upcoming_and_recent_starts_and_skips_unchanged_content(monkeypatch, tmp_path):
+    init_engine(tmp_path / "bot.sqlite")
+    with session_scope() as s:
+        user = User(chat_id=891, tz="UTC")
+        s.add(user)
+        s.flush()
+        feed = Feed(user_id=user.id, url="https://example/events.ics", type="event_ics")
+        s.add(feed)
+        s.flush()
+        feed_id = feed.id
+
+    now = datetime.now(timezone.utc)
+
+    def make_payload(future_link):
+        return (
+            "BEGIN:VCALENDAR\r\n"
+            + "".join(
+                f"BEGIN:VEVENT\r\nUID:{uid}\r\nDTSTART:{start:%Y%m%dT%H%M%SZ}\r\n"
+                f"SUMMARY:{uid}\r\nURL:{link}\r\nEND:VEVENT\r\n"
+                for uid, start, link in (
+                    ("old", now - timedelta(days=2), "https://example.com/old"),
+                    ("recent", now - timedelta(minutes=5), "https://example.com/recent"),
+                    ("future", now + timedelta(days=2), future_link),
+                )
+            )
+            + "END:VCALENDAR\r\n"
+        ).encode("utf-8")
+
+    payload = make_payload("https://example.com/future")
+
+    async def fake_fetch_http(feed):
+        return 200, None, None, payload
+
+    from rssbot import rss as rss_mod
+
+    monkeypatch.setattr(rss_mod, "fetch_feed_http", fake_fetch_http)
+    original_parse = rss_mod._normalized_ics_event_rows
+    parse_calls = []
+
+    def parse_once(*args, **kwargs):
+        parse_calls.append(1)
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(rss_mod, "_normalized_ics_event_rows", parse_once)
+    assert len(asyncio.run(fetch_and_store_event_source(feed_id))) == 2
+    assert asyncio.run(fetch_and_store_event_source(feed_id)) == []
+    assert len(parse_calls) == 1
+
+    payload = make_payload("https://example.com/future-updated")
+    assert asyncio.run(fetch_and_store_event_source(feed_id)) == []
+    assert len(parse_calls) == 2
+    with session_scope() as s:
+        items = s.query(Item).filter(Item.feed_id == feed_id).all()
+        assert {item.external_id for item in items} == {"recent", "future"}
+        assert next(item for item in items if item.external_id == "future").link == (
+            "https://example.com/future-updated"
+        )
 
 
 def test_compute_available_at_normalizes_naive_datetime():

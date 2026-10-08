@@ -172,6 +172,46 @@ def test_deliver_due_event_starts_skips_duplicate_items_by_title_and_time(tmp_pa
         assert deliveries[0].status == "ok"
 
 
+def test_ics_delivery_ignores_old_backlog_but_sends_recent_start(tmp_path):
+    init_engine(tmp_path / "bot.sqlite")
+    with session_scope() as s:
+        user = User(chat_id=12346, tz="UTC")
+        s.add(user)
+        s.flush()
+        feed = Feed(
+            user_id=user.id,
+            url="https://example.com/calendar.ics",
+            type="event_ics",
+            mode="immediate",
+            enabled=True,
+        )
+        s.add(feed)
+        s.flush()
+        feed_id = feed.id
+        s.add(
+            FeedBaseline(
+                feed_id=feed_id,
+                baseline_published_at=datetime.utcnow() - timedelta(days=10),
+            )
+        )
+        for external_id, age in (("old", timedelta(days=2)), ("recent", timedelta(minutes=5))):
+            s.add(
+                Item(
+                    feed_id=feed_id,
+                    external_id=external_id,
+                    title=external_id,
+                    link=f"https://example.com/{external_id}",
+                    published_at=datetime.utcnow() - age,
+                )
+            )
+
+    bot = DummyBot()
+    sent = asyncio.run(BotScheduler(bot=bot)._deliver_due_event_starts(feed_id))
+    assert sent == 1
+    assert len(bot.messages) == 1
+    assert "recent" in bot.messages[0][1]
+
+
 def test_send_video_message_attaches_ai_callback_for_item():
     bot = DummyBot()
     scheduler = BotScheduler(bot=bot)
