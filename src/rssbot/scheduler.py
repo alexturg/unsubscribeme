@@ -30,6 +30,12 @@ def _to_utc_aware(dt: Optional[datetime]) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
+def is_digest_source(feed: Feed) -> bool:
+    return (feed.type or "").strip().lower() not in {
+        "event_json", "event_ics", "event_manual"
+    }
+
+
 def _is_youtube_link(link: str) -> bool:
     parsed = urlparse((link or "").strip())
     host = (parsed.netloc or "").lower()
@@ -385,6 +391,8 @@ class BotScheduler:
 
         now_utc = datetime.now(timezone.utc)
         for feed, user in rows:
+            if not is_digest_source(feed):
+                continue
             if not feed.digest_time_local:
                 continue
             try:
@@ -408,11 +416,11 @@ class BotScheduler:
 
     async def _send_digest_for_feed(
         self, feed_id: int, *, update_last_digest_at: bool = True
-    ) -> None:
+    ) -> int:
         with session_scope() as s:
             feed = s.get(Feed, feed_id)
-            if not feed:
-                return
+            if not feed or not is_digest_source(feed):
+                return 0
             user = s.get(User, feed.user_id)
             rules = feed.rules
             baseline = s.get(FeedBaseline, feed.id)
@@ -420,7 +428,7 @@ class BotScheduler:
             delivered_item_ids = {
                 r[0]
                 for r in s.query(Delivery.item_id)
-                .filter(Delivery.feed_id == feed.id, Delivery.user_id == user.id)
+                .filter(Delivery.feed_id == feed.id, Delivery.user_id == user.id, Delivery.status == "ok")
                 .all()
             }
             items = (
@@ -449,8 +457,13 @@ class BotScheduler:
             kept_info = []
             settings = Settings()
             now_utc = datetime.now(timezone.utc)
+            subscribed_at = _to_utc_aware(feed.created_at)
             for it in items:
                 if it.id in delivered_item_ids:
+                    continue
+                published_at = _to_utc_aware(it.published_at)
+                # An old entry discovered by a later poll is not a new subscription event.
+                if not published_at or (subscribed_at and published_at <= subscribed_at):
                     continue
                 content = Content(
                     title=it.title or "",
@@ -482,7 +495,7 @@ class BotScheduler:
                     f = s.get(Feed, feed_id)
                     if f:
                         f.last_digest_at = datetime.now(timezone.utc)
-            return
+            return 0
 
         kept_info = kept_info[:20]
         send_results = []
@@ -519,6 +532,7 @@ class BotScheduler:
                 f = s.get(Feed, feed_id)
                 if f:
                     f.last_digest_at = now
+        return sum(result["status"] == "ok" for result in send_results)
 
     async def _send_item_once_ignore_mode(self, item_id: int) -> tuple[bool, str]:
         """Send a single item immediately regardless of feed mode.

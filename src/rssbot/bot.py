@@ -27,7 +27,7 @@ from aiogram.types import (
 
 from .config import Settings
 from .db import Delivery, Feed, FeedBaseline, FeedRule, Item, Session, User, session_scope
-from .scheduler import BotScheduler
+from .scheduler import BotScheduler, is_digest_source
 from .rss import fetch_and_store_event_source, fetch_and_store_latest_item
 from .ai_summarizer import (
     AiSummarizerError,
@@ -1852,7 +1852,10 @@ async def cmd_digest(message: Message) -> None:
     with session_scope() as s:
         if arg == "all":
             feeds = s.query(Feed).filter(Feed.user_id == user_id, Feed.enabled == True).all()
-            feed_ids = [f.id for f in feeds]
+            feed_ids = [
+                f.id for f in feeds
+                if is_digest_source(f) and f.mode in {"digest", "on_demand"}
+            ]
         else:
             try:
                 feed_id = int(arg)
@@ -1863,14 +1866,20 @@ async def cmd_digest(message: Message) -> None:
             if not feed or feed.user_id != user_id:
                 await message.answer("Лента не найдена.")
                 return
+            if not is_digest_source(feed):
+                await message.answer("Для источников событий дайджест недоступен.")
+                return
+            if feed.mode not in {"digest", "on_demand"}:
+                await message.answer("Лента не в режиме digest или on_demand.")
+                return
             feed_ids = [feed_id]
     if not feed_ids:
-        await message.answer("Нет активных лент для дайджеста.")
+        await message.answer("Нет активных лент в режиме digest или on_demand.")
         return
-    # Send digest for each feed
+    sent = 0
     for fid in feed_ids:
-        await DEPS.scheduler._send_digest_for_feed(fid, update_last_digest_at=False)
-    await message.answer(f"Дайджест отправлен для {len(feed_ids)} лент.")
+        sent += await DEPS.scheduler._send_digest_for_feed(fid, update_last_digest_at=False)
+    await message.answer(f"Отправлено записей: {sent} (проверено лент: {len(feed_ids)}).")
 
 
 @router.message(Command("mute"))
