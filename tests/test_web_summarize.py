@@ -134,6 +134,8 @@ def test_fetch_webpage_content_resolves_reddit_share_url(monkeypatch, share_get_
         def open(self, request, timeout=None):
             calls.append((request.get_method(), request.full_url))
             if request.full_url == share_url:
+                if request.get_method() == "HEAD":
+                    assert request.get_header("User-agent") == "Twitterbot"
                 if request.get_method() == "HEAD" or share_get_status == 301:
                     raise urllib.error.HTTPError(
                         share_url, 301, "Moved", hdrs={"Location": redirect_url}, fp=None

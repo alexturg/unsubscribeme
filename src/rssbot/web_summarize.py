@@ -32,6 +32,7 @@ REDDIT_HOST_ALIASES = {
     "redd.it",
 }
 MAX_REDDIT_COMMENTS = 32
+REDDIT_SHARE_REDIRECT_USER_AGENT = "Twitterbot"
 REDDIT_BLOCK_PATTERNS = (
     "you've been blocked by network security",
     "you are unable to access reddit",
@@ -726,10 +727,15 @@ def fetch_webpage_content(
         except urllib.error.HTTPError as exc:
             if exc.code == 403:
                 if _is_reddit_share_url(current_url):
-                    # Some Reddit edges reject GET /s/... while still exposing its
-                    # canonical post in the HEAD redirect.
+                    # Some Reddit edges reject browser requests to /s/... but
+                    # expose the canonical post to link-preview clients.
                     head_request = urllib.request.Request(
-                        current_url, headers=request_headers, method="HEAD"
+                        current_url,
+                        headers={
+                            **request_headers,
+                            "User-Agent": REDDIT_SHARE_REDIRECT_USER_AGENT,
+                        },
+                        method="HEAD",
                     )
                     try:
                         with opener.open(head_request, timeout=timeout_sec) as head_response:
