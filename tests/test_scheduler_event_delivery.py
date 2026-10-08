@@ -302,20 +302,20 @@ def test_send_video_message_attaches_ai_callback_for_item(tmp_path):
     assert status == "ok"
     assert error is None
     assert len(bot.messages) == 1
-    _, _, reply_markup = bot.messages[0]
+    _, text, reply_markup = bot.messages[0]
     assert isinstance(reply_markup, InlineKeyboardMarkup)
+    assert '<a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ">Video title</a>' in text
     assert len(reply_markup.inline_keyboard) == 2
-    assert len(reply_markup.inline_keyboard[0]) == 2
-    assert reply_markup.inline_keyboard[0][0].text == "Открыть"
-    assert reply_markup.inline_keyboard[0][1].text == "Сделать /ai"
-    assert reply_markup.inline_keyboard[0][1].callback_data == f"ai:item:{item_id}"
+    assert len(reply_markup.inline_keyboard[0]) == 1
+    assert reply_markup.inline_keyboard[0][0].text == "Сделать /ai"
+    assert reply_markup.inline_keyboard[0][0].callback_data == f"ai:item:{item_id}"
     assert len(reply_markup.inline_keyboard[1]) == 3
     assert reply_markup.inline_keyboard[1][0].text == "✓"
     assert reply_markup.inline_keyboard[1][0].callback_data.startswith("card:done:")
     assert [button.text for button in reply_markup.inline_keyboard[1]] == ["✓", "Skip", "Someday"]
 
 
-def test_send_video_message_without_item_id_has_only_open_button():
+def test_send_video_message_without_item_id_has_legacy_check_button():
     bot = DummyBot()
     scheduler = BotScheduler(bot=bot)
 
@@ -332,17 +332,15 @@ def test_send_video_message_without_item_id_has_only_open_button():
     assert status == "ok"
     assert error is None
     assert len(bot.messages) == 1
-    _, _, reply_markup = bot.messages[0]
+    _, text, reply_markup = bot.messages[0]
     assert isinstance(reply_markup, InlineKeyboardMarkup)
-    assert len(reply_markup.inline_keyboard) == 2
-    assert len(reply_markup.inline_keyboard[0]) == 1
-    assert reply_markup.inline_keyboard[0][0].text == "Открыть"
-    assert len(reply_markup.inline_keyboard[1]) == 1
-    assert reply_markup.inline_keyboard[1][0].text == "✓"
-    assert reply_markup.inline_keyboard[1][0].callback_data == "msg:viewed"
+    assert '<a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ">Video title</a>' in text
+    assert len(reply_markup.inline_keyboard) == 1
+    assert reply_markup.inline_keyboard[0][0].text == "✓"
+    assert reply_markup.inline_keyboard[0][0].callback_data == "msg:viewed"
 
 
-def test_send_video_message_non_youtube_has_only_open_button(tmp_path):
+def test_send_video_message_non_youtube_has_ai_and_linked_title(tmp_path):
     item_id = _seed_card_item(tmp_path, link="https://example.com/post/123")
     bot = DummyBot()
     scheduler = BotScheduler(bot=bot)
@@ -360,11 +358,31 @@ def test_send_video_message_non_youtube_has_only_open_button(tmp_path):
     assert status == "ok"
     assert error is None
     assert len(bot.messages) == 1
-    _, _, reply_markup = bot.messages[0]
+    _, text, reply_markup = bot.messages[0]
     assert isinstance(reply_markup, InlineKeyboardMarkup)
+    assert '<a href="https://example.com/post/123">Article title</a>' in text
     assert len(reply_markup.inline_keyboard) == 2
     assert len(reply_markup.inline_keyboard[0]) == 1
-    assert reply_markup.inline_keyboard[0][0].text == "Открыть"
+    assert reply_markup.inline_keyboard[0][0].text == "Сделать /ai"
     assert len(reply_markup.inline_keyboard[1]) == 3
     assert reply_markup.inline_keyboard[1][0].text == "✓"
     assert reply_markup.inline_keyboard[1][0].callback_data.startswith("card:done:")
+
+
+def test_event_card_links_title_and_keeps_ai(tmp_path):
+    item_id = _seed_card_item(tmp_path, link="https://example.com/event/123")
+    bot = DummyBot()
+    scheduler = BotScheduler(bot=bot)
+    status, error = asyncio.run(
+        scheduler._send_event_start_message(
+            chat_id=12345,
+            title="Event <One>",
+            link="https://example.com/event/123",
+            item_id=item_id,
+        )
+    )
+    assert status == "ok" and error is None
+    _, text, markup = bot.messages[0]
+    assert '<a href="https://example.com/event/123">Event &lt;One&gt;</a>' in text
+    assert [button.text for button in markup.inline_keyboard[0]] == ["Сделать /ai"]
+    assert [button.text for button in markup.inline_keyboard[1]] == ["✓", "Skip", "Someday"]

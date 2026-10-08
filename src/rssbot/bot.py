@@ -35,11 +35,13 @@ from .cards import (
     create_ai_card,
     ensure_link_card,
     get_someday_page,
+    linked_title,
     register_card_message,
     start_someday_view,
 )
 from .scheduler import BotScheduler, is_digest_source
 from .rss import fetch_and_store_event_source, fetch_and_store_latest_item
+from .web_summarize import fetch_webpage_content
 from .ai_summarizer import (
     AiSummarizerError,
     parse_ai_request_text,
@@ -528,17 +530,23 @@ def _single_http_link(raw_text: str) -> Optional[str]:
     return value
 
 
-def _is_youtube_video_link(link: str) -> bool:
-    host = (urlparse(link).hostname or "").lower()
-    if host not in {"youtube.com", "youtu.be", "youtube-nocookie.com"} and not host.endswith(
-        (".youtube.com", ".youtube-nocookie.com")
-    ):
-        return False
+async def _page_title_for_link(link: str) -> str:
+    fallback = (urlparse(link).hostname or link).strip()
     try:
-        extract_video_id(link)
-        return True
-    except ValueError:
-        return False
+        page = await asyncio.wait_for(
+            asyncio.to_thread(
+                fetch_webpage_content,
+                link,
+                timeout_sec=3,
+                max_bytes=256_000,
+                max_words=30,
+            ),
+            timeout=4,
+        )
+        return (page.title or "").strip()[:500] or fallback
+    except Exception as exc:
+        logging.debug("Could not read title for %s: %s", link, exc)
+        return fallback
 
 
 def _looks_like_channel_id(value: str) -> bool:
@@ -1391,7 +1399,7 @@ async def cb_ai_link(callback: CallbackQuery) -> None:
         user = session.query(User).filter(User.chat_id == message.chat.id).first()
         card = session.get(CardEntry, card_id)
         link = card.link if user and card and card.user_id == user.id and card.kind == "link" else None
-    if not link or not _is_youtube_video_link(link):
+    if not link or not _single_http_link(link):
         await callback.answer("Запись недоступна.", show_alert=True)
         return
     await callback.answer("Запускаю /ai...")
@@ -2189,13 +2197,12 @@ async def cmd_plain_link(message: Message) -> None:
     if user_id is None:
         await message.answer("Доступ запрещён.")
         return
-    card_id = ensure_link_card(message.chat.id, message.message_id, link)
-    row = [InlineKeyboardButton(text="Открыть", url=link)]
-    if _is_youtube_video_link(link):
-        row.append(InlineKeyboardButton(text="Сделать /ai", callback_data=f"ai:link:{card_id}"))
+    title = await _page_title_for_link(link)
+    card_id = ensure_link_card(message.chat.id, message.message_id, link, title)
+    row = [InlineKeyboardButton(text="Сделать /ai", callback_data=f"ai:link:{card_id}")]
     try:
         sent = await message.answer(
-            f"Ссылка: {html_escape(link, quote=False)}",
+            f"Ссылка: {linked_title(title, link)}",
             reply_markup=choice_keyboard(card_id, [row]),
         )
     except Exception as exc:

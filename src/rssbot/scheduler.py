@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
+from html import escape as html_escape
 from typing import Optional
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -15,7 +16,7 @@ from .db import Delivery, Feed, Item, User, session_scope, FeedBaseline
 from .rules import Content, matches_rules
 from .rss import compute_available_at, event_identity_hash, fetch_and_store_event_source, fetch_and_store_feed
 from .config import Settings
-from .cards import choice_keyboard, ensure_item_card, register_card_message
+from .cards import choice_keyboard, ensure_item_card, linked_title, register_card_message
 
 
 @dataclass
@@ -37,12 +38,12 @@ def is_digest_source(feed: Feed) -> bool:
     }
 
 
-def _is_youtube_link(link: str) -> bool:
-    parsed = urlparse((link or "").strip())
-    host = (parsed.netloc or "").lower()
-    return host.endswith("youtube.com") or host.endswith("www.youtube.com") or host.endswith(
-        "youtu.be"
-    )
+def _is_http_link(link: str) -> bool:
+    try:
+        parsed = urlparse((link or "").strip())
+        return parsed.scheme.lower() in {"http", "https"} and bool(parsed.hostname)
+    except ValueError:
+        return False
 
 
 MARK_SEEN_CALLBACK_DATA = "msg:viewed"
@@ -148,10 +149,14 @@ class BotScheduler:
     async def _send_event_start_message(
         self, chat_id: int, title: str, link: str, item_id: Optional[int] = None
     ) -> tuple[str, Optional[str]]:
-        text = f"Старт трансляции: {title}"
+        text = f"Старт трансляции: {linked_title(title, link)}"
         try:
             card_id = ensure_item_card(chat_id, item_id) if item_id is not None else None
-            rows = [[InlineKeyboardButton(text="Открыть", url=link)]]
+            rows = (
+                [[InlineKeyboardButton(text="Сделать /ai", callback_data=f"ai:item:{item_id}")]]
+                if item_id is not None and _is_http_link(link)
+                else []
+            )
             kb = choice_keyboard(card_id, rows) if card_id is not None else _with_mark_seen_button(rows)
             sent = await self.ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
             if card_id is not None:
@@ -170,13 +175,15 @@ class BotScheduler:
     ) -> tuple[str, Optional[str]]:
         normalized_feed_name = (feed_name or "").strip()
         feed_name_text = normalized_feed_name or "без названия ленты"
-        text = f"Новый ролик: {title} [{feed_name_text}]"
-        row = [InlineKeyboardButton(text="Открыть", url=link)]
-        if item_id is not None and link and _is_youtube_link(link):
-            row.append(InlineKeyboardButton(text="Сделать /ai", callback_data=f"ai:item:{item_id}"))
+        text = f"Новый ролик: {linked_title(title, link)} [{html_escape(feed_name_text, quote=False)}]"
+        rows = (
+            [[InlineKeyboardButton(text="Сделать /ai", callback_data=f"ai:item:{item_id}")]]
+            if item_id is not None and _is_http_link(link)
+            else []
+        )
         try:
             card_id = ensure_item_card(chat_id, item_id) if item_id is not None else None
-            kb = choice_keyboard(card_id, [row]) if card_id is not None else _with_mark_seen_button([row])
+            kb = choice_keyboard(card_id, rows) if card_id is not None else _with_mark_seen_button(rows)
             sent = await self.ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
             if card_id is not None:
                 register_card_message(card_id, chat_id, getattr(sent, "message_id", None))

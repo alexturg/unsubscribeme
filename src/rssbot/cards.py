@@ -1,12 +1,26 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from html import escape as html_escape
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import and_, or_
 
 from .db import CardEntry, CardMessage, Feed, Item, SomedayView, User, session_scope
+
+
+def linked_title(title: str, link: str) -> str:
+    """Render a safe Telegram HTML title that opens the source when possible."""
+    label = html_escape((title or "").strip() or link or "(без названия)", quote=False)
+    try:
+        parsed = urlparse((link or "").strip())
+        if parsed.scheme.lower() in {"http", "https"} and parsed.hostname:
+            return f'<a href="{html_escape(link, quote=True)}">{label}</a>'
+    except ValueError:
+        pass
+    return label
 
 
 def choice_keyboard(
@@ -70,7 +84,7 @@ def create_ai_card(chat_id: int, title: str, link: str, body: str) -> int:
         return card.id
 
 
-def ensure_link_card(chat_id: int, message_id: int, link: str) -> int:
+def ensure_link_card(chat_id: int, message_id: int, link: str, title: str) -> int:
     """Create one card per submitted message, preserving its link for Someday."""
     with session_scope() as session:
         user = session.query(User).filter(User.chat_id == chat_id).first()
@@ -87,7 +101,7 @@ def ensure_link_card(chat_id: int, message_id: int, link: str) -> int:
                 user_id=user.id,
                 source_key=source_key,
                 kind="link",
-                title=link[:500],
+                title=(title.strip() or link)[:500],
                 link=link,
             )
             session.add(card)
