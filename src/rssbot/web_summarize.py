@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 import ipaddress
 import json
+import logging
 import re
 import socket
 import threading
@@ -295,6 +296,8 @@ def _next_reddit_fallback_url(current_url: str) -> str | None:
     if not _is_reddit_host(parsed.hostname):
         return None
     if _is_reddit_share_url(current_url):
+        return None
+    if parsed.path.lower().endswith(".rss"):
         return None
 
     host = (parsed.hostname or "").lower().rstrip(".")
@@ -800,7 +803,7 @@ def fetch_webpage_content(
                     )
                 payload = _read_limited(response, max_bytes=max_bytes)
         except urllib.error.HTTPError as exc:
-            if exc.code == 403:
+            if exc.code in {403, 429}:
                 if _is_reddit_share_url(current_url):
                     # Some Reddit edges reject browser requests to /s/... but
                     # expose the canonical post to link-preview clients.
@@ -838,6 +841,7 @@ def fetch_webpage_content(
                     ) from exc
                 current_url = _reddit_redirect_url(current_url, location)
                 continue
+            logging.warning("Web fetch failed: HTTP %s for %s", exc.code, current_url)
             raise WebSummarizationError(
                 f"Не удалось загрузить страницу: HTTP {exc.code}."
             ) from exc

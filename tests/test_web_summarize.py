@@ -146,7 +146,7 @@ def test_reddit_rate_limit_retry_is_bounded(monkeypatch, retry_after, expected_c
     assert len(calls) == expected_calls
 
 
-@pytest.mark.parametrize("share_get_status", [301, 403])
+@pytest.mark.parametrize("share_get_status", [301, 403, 429])
 def test_fetch_webpage_content_resolves_reddit_share_url(monkeypatch, share_get_status):
     share_url = "https://www.reddit.com/r/Ingress/s/BGHThr4vvc"
     canonical_url = (
@@ -186,7 +186,7 @@ def test_fetch_webpage_content_resolves_reddit_share_url(monkeypatch, share_get_
                     raise urllib.error.HTTPError(
                         share_url, 301, "Moved", hdrs={"Location": redirect_url}, fp=None
                     )
-                raise urllib.error.HTTPError(share_url, 403, "Forbidden", hdrs={}, fp=None)
+                raise urllib.error.HTTPError(share_url, share_get_status, "Blocked", hdrs={}, fp=None)
             assert request.full_url == canonical_url
             return FakeResponse(canonical_url)
 
@@ -198,6 +198,7 @@ def test_fetch_webpage_content_resolves_reddit_share_url(monkeypatch, share_get_
         lambda *_args, **_kwargs: FakeOpener(),
     )
     monkeypatch.setattr("rssbot.web_summarize.socket.getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr("rssbot.web_summarize.time.sleep", lambda _delay: None)
 
     page = fetch_webpage_content(share_url)
 
@@ -407,7 +408,8 @@ def test_fetch_webpage_content_reddit_403_fallbacks_to_old_and_json(monkeypatch)
     assert "Comment 1: This will affect medal progress for many players." in page.cleaned_text
 
 
-def test_fetch_webpage_content_reddit_403_fallbacks_to_rss(monkeypatch):
+@pytest.mark.parametrize("blocked_status", [403, 429])
+def test_fetch_webpage_content_reddit_block_fallbacks_to_rss(monkeypatch, blocked_status):
     calls: list[str] = []
     xml_payload = b"""<?xml version="1.0" encoding="UTF-8"?>
     <feed xmlns="http://www.w3.org/2005/Atom">
@@ -448,8 +450,8 @@ def test_fetch_webpage_content_reddit_403_fallbacks_to_rss(monkeypatch):
         def open(self, request, timeout=None):
             url = request.full_url
             calls.append(url)
-            if len(calls) <= 3:
-                raise urllib.error.HTTPError(url, 403, "Forbidden", hdrs={}, fp=None)
+            if "/.rss" not in url:
+                raise urllib.error.HTTPError(url, blocked_status, "Blocked", hdrs={}, fp=None)
             if "raw_json=" in url:
                 raise urllib.error.HTTPError(url, 429, "Too Many Requests", hdrs={}, fp=None)
             return FakeResponse(url)
@@ -462,14 +464,16 @@ def test_fetch_webpage_content_reddit_403_fallbacks_to_rss(monkeypatch):
         lambda *_args, **_kwargs: FakeOpener(),
     )
     monkeypatch.setattr("rssbot.web_summarize.socket.getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr("rssbot.web_summarize.time.sleep", lambda _delay: None)
 
     page = fetch_webpage_content(
         "https://www.reddit.com/r/Ingress/comments/1rp5w63/pausing_opr_and_retiring_overclock/"
     )
 
-    assert calls[0].startswith("https://www.reddit.com/")
-    assert calls[1].startswith("https://old.reddit.com/")
-    assert ".json?raw_json=1" in calls[2]
-    assert calls[3].startswith("https://www.reddit.com/")
-    assert calls[3].endswith("/.rss")
+    distinct_calls = list(dict.fromkeys(calls))
+    assert distinct_calls[0].startswith("https://www.reddit.com/")
+    assert distinct_calls[1].startswith("https://old.reddit.com/")
+    assert ".json?raw_json=1" in distinct_calls[2]
+    assert distinct_calls[3].startswith("https://www.reddit.com/")
+    assert distinct_calls[3].endswith("/.rss")
     assert "Pausing OPR and retiring Overclock" in page.cleaned_text
