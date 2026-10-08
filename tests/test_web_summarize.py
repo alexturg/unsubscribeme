@@ -6,6 +6,7 @@ import urllib.request
 import pytest
 
 from rssbot.web_summarize import (
+    _REDDIT_CONTENT_CACHE,
     _extract_text_from_reddit_json,
     _extract_text_from_xml_feed,
     _looks_like_reddit_access_block,
@@ -17,6 +18,13 @@ from rssbot.web_summarize import (
     normalize_web_url,
     validate_web_url_for_fetch,
 )
+
+
+@pytest.fixture(autouse=True)
+def clear_reddit_content_cache():
+    _REDDIT_CONTENT_CACHE.clear()
+    yield
+    _REDDIT_CONTENT_CACHE.clear()
 
 
 def test_normalize_web_url_adds_https_and_removes_fragment():
@@ -197,6 +205,10 @@ def test_fetch_webpage_content_resolves_reddit_share_url(monkeypatch, share_get_
     assert "Agent account discussion." in page.cleaned_text
     assert calls[-1] == ("GET", canonical_url)
     assert all("old.reddit.com" not in url for _, url in calls)
+    request_count = len(calls)
+    assert fetch_webpage_content(canonical_url) == page
+    assert fetch_webpage_content(share_url) == page
+    assert len(calls) == request_count
 
 
 def test_next_reddit_fallback_url_switches_old_reddit_to_json():

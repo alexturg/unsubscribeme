@@ -6,6 +6,7 @@ import ipaddress
 import json
 import re
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -105,6 +106,49 @@ class WebPageContent:
     source_url: str
     title: str
     cleaned_text: str
+
+
+_REDDIT_CONTENT_CACHE: dict[tuple, tuple[float, WebPageContent]] = {}
+_REDDIT_CACHE_LOCK = threading.Lock()
+
+
+def _reddit_content_cache_key(url: str, max_bytes: int, max_words: int, user_agent: str):
+    parsed = urlsplit(url)
+    if not _is_reddit_host(parsed.hostname):
+        return None
+    path = parsed.path.rstrip("/")
+    if path.endswith("/.rss"):
+        path = path[:-5]
+    elif path.endswith(".json"):
+        path = path[:-5]
+    query = urlencode([
+        (key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.lower() not in {"raw_json", "share_id"} and not key.lower().startswith("utm_")
+    ])
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host in REDDIT_HOST_ALIASES and host != "redd.it":
+        host = "reddit.com"
+    return parsed.scheme, host, parsed.port, path.rstrip("/"), query, max_bytes, max_words, user_agent
+
+
+def _cached_reddit_content(key):
+    if key is None:
+        return None
+    with _REDDIT_CACHE_LOCK:
+        entry = _REDDIT_CONTENT_CACHE.get(key)
+        if entry and time.monotonic() - entry[0] < 300:
+            return entry[1]
+        _REDDIT_CONTENT_CACHE.pop(key, None)
+    return None
+
+
+def _cache_reddit_content(key, page: WebPageContent) -> None:
+    if key is None:
+        return
+    with _REDDIT_CACHE_LOCK:
+        if len(_REDDIT_CONTENT_CACHE) >= 64:
+            _REDDIT_CONTENT_CACHE.pop(next(iter(_REDDIT_CONTENT_CACHE)))
+        _REDDIT_CONTENT_CACHE[key] = (time.monotonic(), page)
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -716,6 +760,7 @@ def fetch_webpage_content(
         raise WebSummarizationError("max_redirects must be >= 0")
 
     current_url = validate_web_url_for_fetch(raw_url)
+    original_cache_key = _reddit_content_cache_key(current_url, max_bytes, max_words, user_agent)
     opener = urllib.request.build_opener(_NoRedirectHandler())
     request_headers = {
         "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.1",
@@ -725,6 +770,11 @@ def fetch_webpage_content(
 
     for _ in range(max_redirects + 1):
         current_url = validate_web_url_for_fetch(current_url)
+        cache_key = _reddit_content_cache_key(current_url, max_bytes, max_words, user_agent)
+        cached_page = _cached_reddit_content(cache_key)
+        if cached_page is not None:
+            _cache_reddit_content(original_cache_key, cached_page)
+            return cached_page
         request = urllib.request.Request(current_url, headers=request_headers, method="GET")
 
         try:
@@ -820,6 +870,11 @@ def fetch_webpage_content(
             raise WebSummarizationError(
                 "Не удалось извлечь читаемый текст из страницы."
             )
-        return WebPageContent(source_url=final_url, title=title, cleaned_text=cleaned_text)
+        page = WebPageContent(source_url=final_url, title=title, cleaned_text=cleaned_text)
+        _cache_reddit_content(original_cache_key, page)
+        _cache_reddit_content(
+            _reddit_content_cache_key(final_url, max_bytes, max_words, user_agent), page
+        )
+        return page
 
     raise WebSummarizationError("Слишком много редиректов при загрузке страницы.")
