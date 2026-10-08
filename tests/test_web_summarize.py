@@ -1,6 +1,7 @@
 import json
 import socket
 import urllib.error
+import urllib.request
 
 import pytest
 
@@ -9,6 +10,7 @@ from rssbot.web_summarize import (
     _extract_text_from_xml_feed,
     _looks_like_reddit_access_block,
     _next_reddit_fallback_url,
+    _open_web_request,
     WebSummarizationError,
     extract_readable_text,
     fetch_webpage_content,
@@ -98,6 +100,42 @@ def test_next_reddit_fallback_url_prefers_old_reddit_host():
 
 def test_next_reddit_fallback_url_does_not_rewrite_share_path():
     assert _next_reddit_fallback_url("https://www.reddit.com/r/Ingress/s/BGHThr4vvc") is None
+
+
+def test_reddit_rate_limit_retries_same_request_once(monkeypatch):
+    request = urllib.request.Request("https://www.reddit.com/r/Ingress/comments/abc/.rss")
+    calls = []
+    pauses = []
+    response = object()
+
+    class FakeOpener:
+        def open(self, req, timeout=None):
+            calls.append(req)
+            if len(calls) == 1:
+                raise urllib.error.HTTPError(req.full_url, 429, "Limited", {"Retry-After": "3"}, None)
+            return response
+
+    monkeypatch.setattr("rssbot.web_summarize.time.sleep", pauses.append)
+    assert _open_web_request(FakeOpener(), request, 15) is response
+    assert calls == [request, request]
+    assert pauses == [3.0]
+
+
+@pytest.mark.parametrize("retry_after,expected_calls", [(None, 2), ("60", 1)])
+def test_reddit_rate_limit_retry_is_bounded(monkeypatch, retry_after, expected_calls):
+    request = urllib.request.Request("https://www.reddit.com/r/Ingress/comments/abc/.rss")
+    calls = []
+
+    class FakeOpener:
+        def open(self, req, timeout=None):
+            calls.append(req)
+            headers = {"Retry-After": retry_after} if retry_after else {}
+            raise urllib.error.HTTPError(req.full_url, 429, "Limited", headers, None)
+
+    monkeypatch.setattr("rssbot.web_summarize.time.sleep", lambda _delay: None)
+    with pytest.raises(urllib.error.HTTPError):
+        _open_web_request(FakeOpener(), request, 15)
+    assert len(calls) == expected_calls
 
 
 @pytest.mark.parametrize("share_get_status", [301, 403])

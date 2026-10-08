@@ -6,6 +6,7 @@ import ipaddress
 import json
 import re
 import socket
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
@@ -677,6 +678,27 @@ def _extract_text_from_xml_feed(raw_text: str, max_words: int) -> tuple[str, str
     return title, "\n".join(trimmed)
 
 
+def _open_web_request(opener, request: urllib.request.Request, timeout_sec: int):
+    try:
+        return opener.open(request, timeout=timeout_sec)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 429 or not _is_reddit_host(urlsplit(request.full_url).hostname):
+            raise
+        retry_after = exc.headers.get("Retry-After") if exc.headers else None
+        try:
+            delay = max(1, int(retry_after)) if retry_after else 2
+        except ValueError:
+            raise exc
+        # Keep the retry within the summarizer's overall timeout. Longer limits
+        # must be reported rather than repeatedly requesting the same endpoint.
+        if delay > 5:
+            raise
+        if exc.fp is not None:
+            exc.close()
+        time.sleep(delay)
+        return opener.open(request, timeout=timeout_sec)
+
+
 def fetch_webpage_content(
     raw_url: str,
     *,
@@ -706,7 +728,7 @@ def fetch_webpage_content(
         request = urllib.request.Request(current_url, headers=request_headers, method="GET")
 
         try:
-            with opener.open(request, timeout=timeout_sec) as response:
+            with _open_web_request(opener, request, timeout_sec) as response:
                 final_url = validate_web_url_for_fetch(response.geturl() or current_url)
                 final_parts = urlsplit(final_url)
                 content_type_header = response.headers.get("Content-Type", "")
