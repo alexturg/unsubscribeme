@@ -27,12 +27,13 @@ from aiogram.types import (
 
 from .config import Settings
 from .db import Delivery, Feed, FeedBaseline, FeedRule, Item, Session, User, session_scope
-from .db import CardEntry
+from .db import CardEntry, CardMessage
 from .cards import (
     advance_someday_view,
     choice_keyboard,
     choose_card,
     create_ai_card,
+    ensure_item_card,
     ensure_link_card,
     get_someday_page,
     linked_title,
@@ -643,7 +644,17 @@ async def _run_ai_summary(
     *,
     force_whisper: bool = False,
     source_request_message: Optional[Message] = None,
+    card_message: Optional[Message] = None,
+    existing_card_id: Optional[int] = None,
+    retry_callback: Optional[str] = None,
 ) -> None:
+    if card_message is not None:
+        await _run_ai_summary_in_card(
+            card_message, video_url, custom_prompt,
+            card_id=existing_card_id, force_whisper=force_whisper,
+            retry_callback=retry_callback,
+        )
+        return
     async def _safe_send(
         text: str,
         reply_markup: Optional[InlineKeyboardMarkup] = None,
@@ -768,6 +779,121 @@ async def _run_ai_summary(
         register_card_message(card_id, chat_id, getattr(sent, "message_id", None))
 
     await _cleanup_source_request_message()
+
+
+_AI_CARD_JOBS: set[tuple[int, int]] = set()
+
+
+def _ai_card_page(title, link, body, card_id, page=0, extra_rows=None):
+    # Half the character budget also accommodates characters using two UTF-16
+    # units, which Telegram counts towards its message length limit.
+    label = (title or link or "AI")[:150]
+    chunks = split_message_chunks(body, max_len=1700)
+    page = max(0, min(page, len(chunks) - 1))
+    rows = list(extra_rows or [])
+    if len(chunks) > 1:
+        buttons = []
+        if page > 0:
+            buttons.append(InlineKeyboardButton(text="←", callback_data=f"ai:page:{card_id}:{page - 1}"))
+        if page + 1 < len(chunks):
+            buttons.append(InlineKeyboardButton(text="→", callback_data=f"ai:page:{card_id}:{page + 1}"))
+        rows.append(buttons)
+    counter = f"\n\n{page + 1}/{len(chunks)}" if len(chunks) > 1 else ""
+    text = f"{linked_title(label, link)}\n\n{html_escape(chunks[page], quote=False)}{counter}"
+    return text, choice_keyboard(card_id, rows)
+
+
+async def _run_ai_summary_in_card(
+    message: Message, video_url: str, custom_prompt: Optional[str], *,
+    card_id: Optional[int], force_whisper: bool, retry_callback: Optional[str],
+) -> None:
+    job_key = (message.chat.id, message.message_id)
+    if job_key in _AI_CARD_JOBS:
+        return
+    _AI_CARD_JOBS.add(job_key)
+    try:
+        if card_id is None:
+            card_id = create_ai_card(message.chat.id, f"AI: {video_url}", video_url, "")
+            register_card_message(card_id, message.chat.id, message.message_id)
+        with session_scope() as session:
+            user = session.query(User).filter(User.chat_id == message.chat.id).first()
+            card = session.get(CardEntry, card_id)
+            if user is None or card is None or card.user_id != user.id:
+                return
+            title, link = card.title, card.link
+        start = "Запускаю Whisper-транскрипцию и суммаризацию…" if force_whisper else "Запускаю суммаризацию…"
+        await message.edit_text(
+            f"{linked_title(title[:150], link)}\n\n{start}",
+            parse_mode="HTML", reply_markup=None, disable_web_page_preview=True,
+        )
+        try:
+            result = await summarize_video(
+                DEPS.settings, chat_id=message.chat.id, video_url=video_url,
+                custom_prompt=custom_prompt, force_whisper=force_whisper,
+            )
+        except Exception as exc:
+            if not isinstance(exc, AiSummarizerError):
+                logging.exception("Unexpected AI card failure for chat_id=%s", message.chat.id)
+            error = str(exc)[:1000] if isinstance(exc, AiSummarizerError) else "внутренняя ошибка"
+            rows = [[InlineKeyboardButton(text="Повторить /ai", callback_data=retry_callback)]] if retry_callback else []
+            text, markup = _ai_card_page(
+                title, link, f"Не удалось сделать суммаризацию.\nОшибка: {error}",
+                card_id, extra_rows=rows,
+            )
+            await message.edit_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
+            return
+        if result.summary_basis == "metadata_comments":
+            status = "Субтитры не найдены. Предварительная сводка по описанию и комментариям."
+        elif result.summary_basis == "whisper":
+            status = "Суммаризация готова по транскрипции Whisper."
+        else:
+            status = "Суммаризация готова."
+        focus = f"\nФокус: {custom_prompt}" if custom_prompt else ""
+        body = f"{status}{focus}\n\n{result.summary_text}"
+        with session_scope() as session:
+            session.get(CardEntry, card_id).body = body
+        rows = []
+        if result.summary_basis == "metadata_comments" and result.video_id and not force_whisper:
+            rows.append([InlineKeyboardButton(
+                text="Сделать транскрипцию через Whisper",
+                callback_data=f"ai:whisper:{result.video_id}",
+            )])
+        text, markup = _ai_card_page(title, link, body, card_id, extra_rows=rows)
+        await message.edit_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
+    except Exception:
+        logging.exception("Could not update AI card for chat_id=%s", message.chat.id)
+    finally:
+        _AI_CARD_JOBS.discard(job_key)
+
+
+@router.callback_query(F.data.startswith("ai:page:"))
+async def cb_ai_page(callback: CallbackQuery) -> None:
+    message = callback.message
+    if message is None or not _is_allowed(message.chat.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    try:
+        _, _, raw_id, raw_page = (callback.data or "").split(":")
+        card_id, page = int(raw_id), int(raw_page)
+    except ValueError:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    with session_scope() as session:
+        user = session.query(User).filter(User.chat_id == message.chat.id).first()
+        card = session.get(CardEntry, card_id)
+        if user is None or card is None or card.user_id != user.id or not card.body:
+            await callback.answer("Запись недоступна.", show_alert=True)
+            return
+        title, link, body = card.title, card.link, card.body
+    rows = [row for row in (message.reply_markup.inline_keyboard if message.reply_markup else [])
+            if any((button.callback_data or "").startswith("ai:whisper:") for button in row)]
+    text, markup = _ai_card_page(title, link, body, card_id, page, rows)
+    await callback.answer()
+    try:
+        await message.edit_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
+    except Exception as exc:
+        if "message is not modified" not in str(exc).lower():
+            logging.exception("Could not turn AI card page")
 
 
 def _transcript_languages_from_settings() -> list[str]:
@@ -1381,7 +1507,11 @@ async def cb_ai_item(callback: CallbackQuery) -> None:
             reply_markup=reply_markup,
         )
 
-    await _run_ai_summary(chat_id, video_url, None, _send_text)
+    await _run_ai_summary(
+        chat_id, video_url, None, _send_text,
+        card_message=message, existing_card_id=ensure_item_card(chat_id, item_id),
+        retry_callback=raw_data,
+    )
 
 
 @router.callback_query(F.data.startswith("ai:link:"))
@@ -1414,7 +1544,10 @@ async def cb_ai_link(callback: CallbackQuery) -> None:
             reply_markup=reply_markup,
         )
 
-    await _run_ai_summary(message.chat.id, link, None, _send_text)
+    await _run_ai_summary(
+        message.chat.id, link, None, _send_text,
+        card_message=message, existing_card_id=card_id, retry_callback=callback.data,
+    )
 
 
 @router.callback_query(F.data.startswith("ai:whisper:"))
@@ -1449,7 +1582,20 @@ async def cb_ai_whisper(callback: CallbackQuery) -> None:
         )
 
     watch_url = f"https://www.youtube.com/watch?v={video_id}"
-    await _run_ai_summary(chat_id, watch_url, None, _send_text, force_whisper=True)
+    with session_scope() as session:
+        card_id = (
+            session.query(CardEntry.id)
+            .join(CardMessage, CardMessage.card_id == CardEntry.id)
+            .join(User, User.id == CardEntry.user_id)
+            .filter(User.chat_id == chat_id, CardMessage.chat_id == chat_id,
+                    CardMessage.message_id == message.message_id)
+            .order_by(CardEntry.id.desc()).limit(1)
+            .scalar()
+        )
+    await _run_ai_summary(
+        chat_id, watch_url, None, _send_text, force_whisper=True,
+        card_message=message, existing_card_id=card_id, retry_callback=raw_data,
+    )
 
 
 @router.message(Command("youtube"))

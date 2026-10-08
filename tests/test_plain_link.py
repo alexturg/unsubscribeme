@@ -94,6 +94,8 @@ def test_ai_button_uses_saved_link_for_its_owner(tmp_path, monkeypatch):
     )
     asyncio.run(bot.cb_ai_link(callback))
     assert run_ai.await_args.args[:2] == (77, "https://example.com/article")
+    assert run_ai.await_args.kwargs["card_message"] is callback.message
+    assert run_ai.await_args.kwargs["existing_card_id"] == card_id
 
     callback.message.chat.id = 88
     asyncio.run(bot.cb_ai_link(callback))

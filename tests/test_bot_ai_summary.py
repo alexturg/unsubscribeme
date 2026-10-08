@@ -4,7 +4,7 @@ import pytest
 
 import rssbot.bot as bot_module
 from rssbot.ai_summarizer import AiSummarizerError, AiSummaryResult
-from rssbot.db import User, init_engine, session_scope
+from rssbot.db import CardEntry, User, init_engine, session_scope
 
 
 @pytest.fixture(autouse=True)
@@ -19,9 +19,19 @@ class DummyMessage:
     def __init__(self, text: str) -> None:
         self.text = text
         self.deleted = False
+        self.chat = SimpleNamespace(id=123)
+        self.message_id = 101
+        self.reply_markup = None
+        self.edits = []
 
     async def delete(self) -> None:
         self.deleted = True
+
+    async def edit_text(self, text, **kwargs):
+        self.text = text
+        self.reply_markup = kwargs.get("reply_markup")
+        self.edits.append((text, kwargs))
+        return self
 
 
 class DummyCallback:
@@ -29,7 +39,7 @@ class DummyCallback:
         self.message = message
         self.answers: list[tuple[str, bool]] = []
 
-    async def answer(self, text: str, show_alert: bool = False) -> None:
+    async def answer(self, text: str = "", show_alert: bool = False) -> None:
         self.answers.append((text, show_alert))
 
 
@@ -231,3 +241,116 @@ def test_looks_like_missing_subtitles_error_accepts_proxy_disconnect():
         "RemoteDisconnected('Remote end closed connection without response'))"
     )
     assert bot_module._looks_like_missing_subtitles_error(exc) is True
+
+
+@pytest.mark.parametrize("basis", ["captions", "metadata_comments", "whisper"])
+def test_ai_button_edits_original_card_without_new_messages(monkeypatch, basis):
+    monkeypatch.setattr(bot_module, "DEPS", SimpleNamespace(settings=SimpleNamespace()))
+    url = "https://example.com/post"
+    card_id = bot_module.ensure_link_card(123, 100, url, "Original <title>")
+    message = DummyMessage("Original card")
+    sent, send_text = _make_send_text()
+
+    async def summarize(*_args, **_kwargs):
+        assert len(message.edits) == 1
+        assert "Запускаю" in message.text
+        assert message.reply_markup is None
+        return AiSummaryResult("Summary <result>", None, None, "youtube", basis, "dQw4w9WgXcQ")
+
+    monkeypatch.setattr(bot_module, "summarize_video", summarize)
+    asyncio.run(bot_module._run_ai_summary(
+        123, url, None, send_text, card_message=message, existing_card_id=card_id,
+    ))
+    assert sent == []
+    assert not message.deleted
+    assert len(message.edits) == 2
+    assert "Original &lt;title&gt;" in message.text
+    assert "Summary &lt;result&gt;" in message.text
+    buttons = [button for row in message.reply_markup.inline_keyboard for button in row]
+    assert [b.text for b in buttons[-3:]] == ["✓", "Skip", "Someday"]
+    assert buttons[-3].callback_data == f"card:done:{card_id}"
+    assert any((b.callback_data or "").startswith("ai:whisper:") for b in buttons) == (basis == "metadata_comments")
+    with session_scope() as session:
+        assert session.query(CardEntry).count() == 1
+        assert "Summary <result>" in session.get(CardEntry, card_id).body
+
+
+def test_ai_card_error_keeps_card_and_retry_button(monkeypatch):
+    monkeypatch.setattr(bot_module, "DEPS", SimpleNamespace(settings=SimpleNamespace()))
+    url = "https://example.com/post"
+    card_id = bot_module.ensure_link_card(123, 100, url, "Post")
+    message = DummyMessage("Original card")
+    sent, send_text = _make_send_text()
+
+    async def summarize(*_args, **_kwargs):
+        raise AiSummarizerError("HTTP 429 <blocked>")
+
+    monkeypatch.setattr(bot_module, "summarize_video", summarize)
+    asyncio.run(bot_module._run_ai_summary(
+        123, url, None, send_text, card_message=message, existing_card_id=card_id,
+        retry_callback=f"ai:link:{card_id}",
+    ))
+    assert sent == []
+    assert len(message.edits) == 2
+    assert not message.deleted
+    assert "HTTP 429 &lt;blocked&gt;" in message.text
+    assert message.reply_markup.inline_keyboard[0][0].callback_data == f"ai:link:{card_id}"
+    with session_scope() as session:
+        assert session.get(CardEntry, card_id).body is None
+
+
+def test_long_summary_pages_edit_same_card_and_check_owner(monkeypatch):
+    monkeypatch.setattr(bot_module, "DEPS", SimpleNamespace(settings=SimpleNamespace()))
+    monkeypatch.setattr(bot_module, "_is_allowed", lambda _: True)
+    url = "https://example.com/post"
+    card_id = bot_module.ensure_link_card(123, 100, url, "Post")
+    message = DummyMessage("Original card")
+    sent, send_text = _make_send_text()
+
+    async def summarize(*_args, **_kwargs):
+        return AiSummaryResult("First.\n" + "😀" * 2500 + "\nLast.", None, None, "web_page", "web_page", None)
+
+    monkeypatch.setattr(bot_module, "summarize_video", summarize)
+    asyncio.run(bot_module._run_ai_summary(
+        123, url, None, send_text, card_message=message, existing_card_id=card_id,
+    ))
+    assert not sent
+    next_button = message.reply_markup.inline_keyboard[0][0]
+    assert next_button.callback_data.startswith(f"ai:page:{card_id}:")
+    callback = DummyCallback(message)
+    callback.data = next_button.callback_data
+    asyncio.run(bot_module.cb_ai_page(callback))
+    assert len(message.edits) == 3
+    for text, _kwargs in message.edits:
+        assert len(text.encode("utf-16-le")) // 2 < 4096
+    with session_scope() as session:
+        assert session.get(CardEntry, card_id).body.endswith("Last.")
+    message.chat.id = 222
+    asyncio.run(bot_module.cb_ai_page(callback))
+    assert len(message.edits) == 3
+    assert callback.answers[-1] == ("Запись недоступна.", True)
+
+
+def test_double_ai_click_runs_summary_once(monkeypatch):
+    monkeypatch.setattr(bot_module, "DEPS", SimpleNamespace(settings=SimpleNamespace()))
+    url = "https://example.com/post"
+    card_id = bot_module.ensure_link_card(123, 100, url, "Post")
+    message = DummyMessage("Original card")
+    sent, send_text = _make_send_text()
+    calls = []
+
+    async def summarize(*_args, **_kwargs):
+        calls.append(True)
+        await asyncio.sleep(0.01)
+        return AiSummaryResult("Summary", None, None, "web_page", "web_page", None)
+
+    monkeypatch.setattr(bot_module, "summarize_video", summarize)
+    async def run():
+        await asyncio.gather(*[
+            bot_module._run_ai_summary(123, url, None, send_text, card_message=message, existing_card_id=card_id)
+            for _ in range(2)
+        ])
+    asyncio.run(run())
+    assert len(calls) == 1
+    assert len(message.edits) == 2
+    assert not sent
