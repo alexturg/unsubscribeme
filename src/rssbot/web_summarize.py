@@ -192,14 +192,16 @@ def _read_reddit_disk_cache(key, cache_dir: Path | None, *, allow_stale: bool = 
         return None
 
 
-def _write_reddit_disk_cache(key, page: WebPageContent, cache_dir: Path | None) -> None:
+def _write_reddit_disk_cache(
+    key, page: WebPageContent, cache_dir: Path | None, *, fetched_at: float | None = None
+) -> None:
     if key is None or cache_dir is None:
         return
     temporary_path = None
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
         payload = {
-            "fetched_at": time.time(),
+            "fetched_at": time.time() if fetched_at is None else fetched_at,
             "page": {"source_url": page.source_url, "title": page.title, "cleaned_text": page.cleaned_text},
         }
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=cache_dir, delete=False) as stream:
@@ -845,6 +847,16 @@ def fetch_webpage_content(
         if cached_page is None:
             cached_page = _read_reddit_disk_cache(cache_key, cache_dir)
         if cached_page is not None:
+            if cache_dir is not None and original_cache_key != cache_key:
+                try:
+                    saved_at = json.loads(
+                        _reddit_cache_path(cache_key, cache_dir).read_text(encoding="utf-8")
+                    )["fetched_at"]
+                    _write_reddit_disk_cache(
+                        original_cache_key, cached_page, cache_dir, fetched_at=float(saved_at)
+                    )
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
             return cached_page
         request = urllib.request.Request(current_url, headers=request_headers, method="GET")
 
