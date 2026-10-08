@@ -183,7 +183,7 @@ def test_next_reddit_fallback_url_switches_json_to_rss():
     assert (
         fallback
         == "https://www.reddit.com/r/Ingress/comments/1rp5w63/pausing_opr_and_retiring_overclock/.rss"
-        "?sort=top&raw_json=1"
+        "?sort=top"
     )
 
 
@@ -400,6 +400,8 @@ def test_fetch_webpage_content_reddit_403_fallbacks_to_rss(monkeypatch):
             calls.append(url)
             if len(calls) <= 3:
                 raise urllib.error.HTTPError(url, 403, "Forbidden", hdrs={}, fp=None)
+            if "raw_json=" in url:
+                raise urllib.error.HTTPError(url, 429, "Too Many Requests", hdrs={}, fp=None)
             return FakeResponse(url)
 
     def fake_getaddrinfo(host, port, type=None):
@@ -419,5 +421,5 @@ def test_fetch_webpage_content_reddit_403_fallbacks_to_rss(monkeypatch):
     assert calls[1].startswith("https://old.reddit.com/")
     assert ".json?raw_json=1" in calls[2]
     assert calls[3].startswith("https://www.reddit.com/")
-    assert calls[3].endswith("/.rss?raw_json=1")
+    assert calls[3].endswith("/.rss")
     assert "Pausing OPR and retiring Overclock" in page.cleaned_text

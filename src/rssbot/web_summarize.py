@@ -278,7 +278,10 @@ def _next_reddit_fallback_url(current_url: str) -> str | None:
         rss_path = f"{rss_path}.rss"
         port = parsed.port
         netloc = "www.reddit.com" if port is None else f"www.reddit.com:{port}"
-        return urlunsplit((parsed.scheme, netloc, rss_path, parsed.query, ""))
+        rss_query = urlencode(
+            [(key, value) for key, value in query_items if key.lower() != "raw_json"]
+        )
+        return urlunsplit((parsed.scheme, netloc, rss_path, rss_query, ""))
 
     return None
 
