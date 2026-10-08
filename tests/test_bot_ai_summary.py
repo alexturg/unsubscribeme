@@ -1,8 +1,18 @@
 import asyncio
 from types import SimpleNamespace
+import pytest
 
 import rssbot.bot as bot_module
 from rssbot.ai_summarizer import AiSummarizerError, AiSummaryResult
+from rssbot.db import User, init_engine, session_scope
+
+
+@pytest.fixture(autouse=True)
+def card_db(tmp_path):
+    init_engine(tmp_path / "bot.sqlite")
+    with session_scope() as session:
+        for chat_id in (123, 111, 222, 999):
+            session.add(User(chat_id=chat_id))
 
 
 class DummyMessage:
@@ -70,7 +80,8 @@ def test_run_ai_summary_deletes_progress_message_on_success(monkeypatch):
     summary_kb = sent[1][1]
     assert summary_kb is not None
     assert summary_kb.inline_keyboard[0][0].text == "✓"
-    assert summary_kb.inline_keyboard[0][0].callback_data == "msg:viewed"
+    assert summary_kb.inline_keyboard[0][0].callback_data.startswith("card:done:")
+    assert [button.text for button in summary_kb.inline_keyboard[0]] == ["✓", "Skip", "Someday"]
     assert source_message.deleted is True
 
 
@@ -183,7 +194,7 @@ def test_run_ai_summary_metadata_comments_keeps_whisper_and_seen_buttons(monkeyp
     assert summary_kb.inline_keyboard[0][0].text == "Сделать транскрипцию через Whisper"
     assert summary_kb.inline_keyboard[0][0].callback_data == "ai:whisper:dQw4w9WgXcQ"
     assert summary_kb.inline_keyboard[1][0].text == "✓"
-    assert summary_kb.inline_keyboard[1][0].callback_data == "msg:viewed"
+    assert summary_kb.inline_keyboard[1][0].callback_data.startswith("card:done:")
 
 
 def test_cb_mark_seen_deletes_message(monkeypatch):

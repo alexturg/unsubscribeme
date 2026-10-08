@@ -27,6 +27,16 @@ from aiogram.types import (
 
 from .config import Settings
 from .db import Delivery, Feed, FeedBaseline, FeedRule, Item, Session, User, session_scope
+from .db import CardEntry
+from .cards import (
+    advance_someday_view,
+    choice_keyboard,
+    choose_card,
+    create_ai_card,
+    get_someday_page,
+    register_card_message,
+    start_someday_view,
+)
 from .scheduler import BotScheduler, is_digest_source
 from .rss import fetch_and_store_event_source, fetch_and_store_latest_item
 from .ai_summarizer import (
@@ -121,7 +131,7 @@ async def cmd_start(message: Message) -> None:
         "3) Настрой режим/фильтры: /setmode, /setfilter\n\n"
         "<b>События:</b> /addeventsource, /addics, /addevents\n"
         "<b>AI:</b> /ai, /audio, /transcribe, /bullshit\n"
-        "<b>Управление:</b> /remove, /mute, /unmute, /digest"
+        "<b>Управление:</b> /remove, /mute, /unmute, /digest, /someday"
     )
 
 
@@ -693,8 +703,10 @@ async def _run_ai_summary(
         status_line = "Суммаризация готова."
 
     response_text = f"{status_line}\nИсточник: {video_url}{focus_text}\n\n{result.summary_text}"
+    card_id = create_ai_card(chat_id, f"AI: {video_url}", video_url, response_text)
     if result.summary_basis == "metadata_comments" and result.video_id and not force_whisper:
-        whisper_kb = _mark_seen_keyboard(
+        whisper_kb = choice_keyboard(
+            card_id,
             rows=[
                 [
                     InlineKeyboardButton(
@@ -704,15 +716,19 @@ async def _run_ai_summary(
                 ]
             ]
         )
-        if await _safe_send(response_text, reply_markup=whisper_kb) is None:
+        sent = await _safe_send(response_text, reply_markup=whisper_kb)
+        if sent is None:
             return
+        register_card_message(card_id, chat_id, getattr(sent, "message_id", None))
         await _cleanup_source_request_message()
         return
 
-    seen_kb = _mark_seen_keyboard()
+    seen_kb = choice_keyboard(card_id)
     for chunk in split_message_chunks(response_text):
-        if await _safe_send(chunk, reply_markup=seen_kb) is None:
+        sent = await _safe_send(chunk, reply_markup=seen_kb)
+        if sent is None:
             return
+        register_card_message(card_id, chat_id, getattr(sent, "message_id", None))
 
     await _cleanup_source_request_message()
 
@@ -1119,6 +1135,162 @@ async def cb_mark_seen(callback: CallbackQuery) -> None:
             exc_info=True,
         )
         await callback.answer("Не удалось удалить сообщение.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("card:"))
+async def cb_card_choice(callback: CallbackQuery) -> None:
+    message = callback.message
+    if message is None or not _is_allowed(message.chat.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    try:
+        _, status, raw_id = (callback.data or "").split(":", 2)
+        card_id = int(raw_id)
+    except (ValueError, TypeError):
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    if status not in {"done", "skipped", "someday"}:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    found, message_ids = choose_card(message.chat.id, card_id, status)
+    if not found:
+        await callback.answer("Запись недоступна.", show_alert=True)
+        return
+    failed = False
+    current_id = getattr(message, "message_id", None)
+    for message_id in message_ids:
+        if message_id == current_id:
+            continue
+        try:
+            await callback.bot.delete_message(chat_id=message.chat.id, message_id=message_id)
+        except Exception:
+            failed = True
+    try:
+        await message.delete()
+    except Exception:
+        failed = True
+    label = {"done": "Отмечено ✓", "skipped": "Пропущено", "someday": "Добавлено в Someday"}[status]
+    await callback.answer(label if not failed else f"{label}, но не все сообщения удалось удалить.", show_alert=failed)
+
+
+def _someday_markup(view_id: int, page: int, cards: list[CardEntry], has_more: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for number, card in enumerate(cards, start=1):
+        row = [
+            InlineKeyboardButton(text=f"✓ {number}", callback_data=f"sm:a:{view_id}:{page}:{card.id}:d"),
+            InlineKeyboardButton(text=f"Skip {number}", callback_data=f"sm:a:{view_id}:{page}:{card.id}:s"),
+        ]
+        if card.kind == "ai" and card.body:
+            row.append(InlineKeyboardButton(text=f"Подробнее {number}", callback_data=f"sm:d:{card.id}"))
+        rows.append(row)
+    navigation = []
+    if page > 1:
+        navigation.append(InlineKeyboardButton(text="Back", callback_data=f"sm:b:{view_id}:{page - 1}"))
+    if has_more and cards:
+        navigation.append(
+            InlineKeyboardButton(text="More", callback_data=f"sm:m:{view_id}:{page}:{cards[-1].id}")
+        )
+    if navigation:
+        rows.append(navigation)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _someday_text(page: int, cards: list[CardEntry]) -> str:
+    if not cards:
+        return f"<b>Someday · страница {page}</b>\nСписок пуст."
+    lines = [f"<b>Someday · страница {page}</b>"]
+    for number, card in enumerate(cards, start=1):
+        title = html_escape(card.title[:160], quote=False)
+        link = (card.link or "").strip()
+        if link.startswith(("https://", "http://")):
+            title = f'<a href="{html_escape(link, quote=True)}">{title}</a>'
+        lines.append(f"{number}. {title}")
+        if card.kind == "ai" and card.body:
+            preview = " ".join(card.body.split())[:150]
+            lines.append(f"   {html_escape(preview, quote=False)}…")
+    return "\n".join(lines)
+
+
+async def _show_someday_page(message: Message, user_id: int, view_id: int, page: int, *, edit: bool) -> bool:
+    result = get_someday_page(user_id, view_id, page)
+    if result is None:
+        return False
+    cards, has_more = result
+    text = _someday_text(page, cards)
+    markup = _someday_markup(view_id, page, cards, has_more)
+    if edit:
+        await message.edit_text(text, reply_markup=markup)
+    else:
+        await message.answer(text, reply_markup=markup)
+    return True
+
+
+@router.message(Command("someday"))
+async def cmd_someday(message: Message) -> None:
+    user_id = _ensure_user_id(message)
+    if user_id is None:
+        await message.answer("Доступ запрещён.")
+        return
+    view_id = start_someday_view(user_id)
+    await _show_someday_page(message, user_id, view_id, 1, edit=False)
+
+
+@router.callback_query(F.data.startswith("sm:"))
+async def cb_someday(callback: CallbackQuery) -> None:
+    message = callback.message
+    if message is None or not _is_allowed(message.chat.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    with session_scope() as session:
+        user = session.query(User).filter(User.chat_id == message.chat.id).first()
+        user_id = user.id if user else None
+    if user_id is None:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+    parts = (callback.data or "").split(":")
+    try:
+        action = parts[1]
+        if action == "d" and len(parts) == 3:
+            card_id = int(parts[2])
+            with session_scope() as session:
+                card = session.get(CardEntry, card_id)
+                body = card.body if card and card.user_id == user_id and card.status == "someday" else None
+            if not body:
+                await callback.answer("Запись недоступна.", show_alert=True)
+                return
+            await callback.answer()
+            for chunk in split_message_chunks(body):
+                await callback.bot.send_message(chat_id=message.chat.id, text=html_escape(chunk, quote=False))
+            return
+        view_id = int(parts[2])
+        page = int(parts[3])
+        if action == "m" and len(parts) == 5:
+            if not advance_someday_view(user_id, view_id, page, int(parts[4])):
+                await callback.answer("Список изменился. Откройте /someday снова.", show_alert=True)
+                return
+            page += 1
+        elif action == "b" and len(parts) == 4:
+            pass
+        elif action == "a" and len(parts) == 6:
+            status = {"d": "done", "s": "skipped"}[parts[5]]
+            card_id = int(parts[4])
+            current = get_someday_page(user_id, view_id, page)
+            if current is None or card_id not in {card.id for card in current[0]}:
+                await callback.answer("Список изменился. Откройте /someday снова.", show_alert=True)
+                return
+            found, _ = choose_card(message.chat.id, card_id, status)
+            if not found:
+                await callback.answer("Запись недоступна.", show_alert=True)
+                return
+        else:
+            raise ValueError("Invalid Someday action")
+    except (ValueError, IndexError, KeyError):
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    if not await _show_someday_page(message, user_id, view_id, page, edit=True):
+        await callback.answer("Откройте /someday снова.", show_alert=True)
+        return
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("ai:item:"))

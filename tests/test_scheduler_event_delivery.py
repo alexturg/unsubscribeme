@@ -269,7 +269,23 @@ def test_ics_delivery_ignores_old_backlog_but_sends_recent_start(tmp_path):
     assert "recent" in bot.messages[0][1]
 
 
-def test_send_video_message_attaches_ai_callback_for_item():
+def _seed_card_item(tmp_path, *, link: str) -> int:
+    init_engine(tmp_path / "card.sqlite")
+    with session_scope() as session:
+        user = User(chat_id=12345)
+        session.add(user)
+        session.flush()
+        feed = Feed(user_id=user.id, url="https://example.com/feed")
+        session.add(feed)
+        session.flush()
+        item = Item(feed_id=feed.id, external_id="card", title="Card", link=link)
+        session.add(item)
+        session.flush()
+        return item.id
+
+
+def test_send_video_message_attaches_ai_callback_for_item(tmp_path):
+    item_id = _seed_card_item(tmp_path, link="https://www.youtube.com/watch?v=dQw4w9WgXcQ")
     bot = DummyBot()
     scheduler = BotScheduler(bot=bot)
 
@@ -279,7 +295,7 @@ def test_send_video_message_attaches_ai_callback_for_item():
             title="Video title",
             link="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             feed_name="Test feed",
-            item_id=42,
+            item_id=item_id,
         )
     )
 
@@ -292,10 +308,11 @@ def test_send_video_message_attaches_ai_callback_for_item():
     assert len(reply_markup.inline_keyboard[0]) == 2
     assert reply_markup.inline_keyboard[0][0].text == "Открыть"
     assert reply_markup.inline_keyboard[0][1].text == "Сделать /ai"
-    assert reply_markup.inline_keyboard[0][1].callback_data == "ai:item:42"
-    assert len(reply_markup.inline_keyboard[1]) == 1
+    assert reply_markup.inline_keyboard[0][1].callback_data == f"ai:item:{item_id}"
+    assert len(reply_markup.inline_keyboard[1]) == 3
     assert reply_markup.inline_keyboard[1][0].text == "✓"
-    assert reply_markup.inline_keyboard[1][0].callback_data == "msg:viewed"
+    assert reply_markup.inline_keyboard[1][0].callback_data.startswith("card:done:")
+    assert [button.text for button in reply_markup.inline_keyboard[1]] == ["✓", "Skip", "Someday"]
 
 
 def test_send_video_message_without_item_id_has_only_open_button():
@@ -325,7 +342,8 @@ def test_send_video_message_without_item_id_has_only_open_button():
     assert reply_markup.inline_keyboard[1][0].callback_data == "msg:viewed"
 
 
-def test_send_video_message_non_youtube_has_only_open_button():
+def test_send_video_message_non_youtube_has_only_open_button(tmp_path):
+    item_id = _seed_card_item(tmp_path, link="https://example.com/post/123")
     bot = DummyBot()
     scheduler = BotScheduler(bot=bot)
 
@@ -335,7 +353,7 @@ def test_send_video_message_non_youtube_has_only_open_button():
             title="Article title",
             link="https://example.com/post/123",
             feed_name="Test feed",
-            item_id=42,
+            item_id=item_id,
         )
     )
 
@@ -347,6 +365,6 @@ def test_send_video_message_non_youtube_has_only_open_button():
     assert len(reply_markup.inline_keyboard) == 2
     assert len(reply_markup.inline_keyboard[0]) == 1
     assert reply_markup.inline_keyboard[0][0].text == "Открыть"
-    assert len(reply_markup.inline_keyboard[1]) == 1
+    assert len(reply_markup.inline_keyboard[1]) == 3
     assert reply_markup.inline_keyboard[1][0].text == "✓"
-    assert reply_markup.inline_keyboard[1][0].callback_data == "msg:viewed"
+    assert reply_markup.inline_keyboard[1][0].callback_data.startswith("card:done:")

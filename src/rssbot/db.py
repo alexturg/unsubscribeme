@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     create_engine,
     func,
@@ -124,6 +125,50 @@ class Delivery(Base):
     error_message: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
 
 
+class CardEntry(Base):
+    __tablename__ = "card_entries"
+    __table_args__ = (UniqueConstraint("user_id", "source_key", name="uq_card_user_source"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    source_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    link: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+    status_source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    chosen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    someday_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CardMessage(Base):
+    __tablename__ = "card_messages"
+    __table_args__ = (UniqueConstraint("chat_id", "message_id", name="uq_card_message"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    card_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    chat_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    message_id: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class SomedayView(Base):
+    __tablename__ = "someday_views"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    top_card_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    anchors: Mapped[list[int]] = mapped_column(JSON, nullable=False, default=lambda: [0])
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SchemaMigration(Base):
+    __tablename__ = "schema_migrations"
+
+    version: Mapped[str] = mapped_column(String(64), primary_key=True)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class FeedBaseline(Base):
     __tablename__ = "feed_baselines"
 
@@ -158,6 +203,7 @@ def init_engine(db_path: Path) -> Engine:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(f"sqlite:///{db_path}", future=True, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
+    _migrate_legacy_deliveries(engine)
     _engine = engine
     _SessionLocal = sessionmaker(
         bind=engine,
@@ -167,6 +213,48 @@ def init_engine(db_path: Path) -> Engine:
         expire_on_commit=False,
     )
     return engine
+
+
+def _migrate_legacy_deliveries(engine: Engine) -> None:
+    """One-time, additive backfill. A successful old delivery is presumed checked."""
+    version = "card_entries_v1_legacy_deliveries"
+    with Session(engine) as session, session.begin():
+        if session.get(SchemaMigration, version) is not None:
+            return
+        rows = (
+            session.query(Delivery, Item, Feed.type)
+            .outerjoin(Item, Delivery.item_id == Item.id)
+            .outerjoin(Feed, Delivery.feed_id == Feed.id)
+            .filter(Delivery.status == "ok")
+            .order_by(Delivery.id.asc())
+            .all()
+        )
+        seen: set[tuple[int, int]] = set()
+        for delivery, item, feed_type in rows:
+            identity = (delivery.user_id, delivery.item_id)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            source_key = f"item:{delivery.item_id}"
+            existing = session.query(CardEntry.id).filter(
+                CardEntry.user_id == delivery.user_id, CardEntry.source_key == source_key
+            ).first()
+            if existing:
+                continue
+            is_event = (feed_type or "").startswith("event_")
+            session.add(
+                CardEntry(
+                    user_id=delivery.user_id,
+                    source_key=source_key,
+                    kind="event" if is_event else "feed",
+                    title=(item.title if item else None) or "(удалённая запись)",
+                    link=item.link if item else None,
+                    status="done",
+                    status_source="legacy_delivery",
+                    chosen_at=None,
+                )
+            )
+        session.add(SchemaMigration(version=version))
 
 
 @contextmanager

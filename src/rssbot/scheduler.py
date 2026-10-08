@@ -15,6 +15,7 @@ from .db import Delivery, Feed, Item, User, session_scope, FeedBaseline
 from .rules import Content, matches_rules
 from .rss import compute_available_at, event_identity_hash, fetch_and_store_event_source, fetch_and_store_feed
 from .config import Settings
+from .cards import choice_keyboard, ensure_item_card, register_card_message
 
 
 @dataclass
@@ -145,12 +146,16 @@ class BotScheduler:
             await self._maybe_deliver_immediate(item_id)
 
     async def _send_event_start_message(
-        self, chat_id: int, title: str, link: str
+        self, chat_id: int, title: str, link: str, item_id: Optional[int] = None
     ) -> tuple[str, Optional[str]]:
         text = f"Старт трансляции: {title}"
-        kb = _with_mark_seen_button([[InlineKeyboardButton(text="Открыть", url=link)]])
         try:
-            await self.ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+            card_id = ensure_item_card(chat_id, item_id) if item_id is not None else None
+            rows = [[InlineKeyboardButton(text="Открыть", url=link)]]
+            kb = choice_keyboard(card_id, rows) if card_id is not None else _with_mark_seen_button(rows)
+            sent = await self.ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+            if card_id is not None:
+                register_card_message(card_id, chat_id, getattr(sent, "message_id", None))
             return "ok", None
         except Exception as e:
             return "fail", str(e)[:1000]
@@ -169,9 +174,12 @@ class BotScheduler:
         row = [InlineKeyboardButton(text="Открыть", url=link)]
         if item_id is not None and link and _is_youtube_link(link):
             row.append(InlineKeyboardButton(text="Сделать /ai", callback_data=f"ai:item:{item_id}"))
-        kb = _with_mark_seen_button([row])
         try:
-            await self.ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+            card_id = ensure_item_card(chat_id, item_id) if item_id is not None else None
+            kb = choice_keyboard(card_id, [row]) if card_id is not None else _with_mark_seen_button([row])
+            sent = await self.ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+            if card_id is not None:
+                register_card_message(card_id, chat_id, getattr(sent, "message_id", None))
             return "ok", None
         except Exception as e:
             return "fail", str(e)[:1000]
@@ -362,7 +370,7 @@ class BotScheduler:
                 link = item.link or ""
                 event_key_v = event_key
 
-            status, error = await self._send_event_start_message(chat_id, title, link)
+            status, error = await self._send_event_start_message(chat_id, title, link, item_id_v)
             with session_scope() as s:
                 s.add(
                     Delivery(
