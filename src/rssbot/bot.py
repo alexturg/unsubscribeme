@@ -1844,7 +1844,7 @@ async def cmd_digest(message: Message) -> None:
         return
     parts = (message.text or "").split()
     if len(parts) < 2:
-        await message.answer("Использование: /digest <feed_id|all>")
+        await message.answer("Использование: /digest &lt;feed_id|all&gt;")
         return
     arg = parts[1].lower()
     with session_scope() as s:
