@@ -1343,6 +1343,10 @@ def _someday_markup(view_id: int, page: int, cards: list[CardEntry], has_more: b
             InlineKeyboardButton(text=f"✓ {number}", callback_data=f"sm:a:{view_id}:{page}:{card.id}:d"),
             InlineKeyboardButton(text=f"Skip {number}", callback_data=f"sm:a:{view_id}:{page}:{card.id}:s"),
         ]
+        if _single_http_link(card.link or ""):
+            row.append(
+                InlineKeyboardButton(text=f"AI {number}", callback_data=f"sm:ai:{view_id}:{page}:{card.id}")
+            )
         if card.kind == "ai" and card.body:
             row.append(InlineKeyboardButton(text=f"Подробнее {number}", callback_data=f"sm:d:{card.id}"))
         rows.append(row)
@@ -1424,6 +1428,28 @@ async def cb_someday(callback: CallbackQuery) -> None:
             await callback.answer()
             for chunk in split_message_chunks(body):
                 await callback.bot.send_message(chat_id=message.chat.id, text=html_escape(chunk, quote=False))
+            return
+        if action == "ai" and len(parts) == 5:
+            view_id, page, card_id = (int(value) for value in parts[2:5])
+            current = get_someday_page(user_id, view_id, page)
+            card = next((entry for entry in current[0] if entry.id == card_id), None) if current else None
+            link = _single_http_link(card.link or "") if card else None
+            if not link:
+                await callback.answer("Запись недоступна. Откройте /someday снова.", show_alert=True)
+                return
+            await callback.answer("Запускаю /ai...")
+
+            async def _send_text(
+                text: str,
+                reply_markup: Optional[InlineKeyboardMarkup] = None,
+            ) -> Optional[Message]:
+                return await callback.bot.send_message(
+                    chat_id=message.chat.id,
+                    text=html_escape(text, quote=False),
+                    reply_markup=reply_markup,
+                )
+
+            await _run_ai_summary(message.chat.id, link, None, _send_text)
             return
         view_id = int(parts[2])
         page = int(parts[3])

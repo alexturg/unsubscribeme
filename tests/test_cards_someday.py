@@ -257,3 +257,55 @@ def test_card_choice_saves_before_deleting_all_ai_messages(tmp_path, monkeypatch
         assert session.get(CardEntry, card_id).status == "someday"
     message.delete.assert_awaited_once()
     bot.delete_message.assert_awaited_once_with(chat_id=77, message_id=11)
+
+
+def test_someday_ai_button_summarizes_link_and_keeps_item(tmp_path, monkeypatch):
+    init_engine(tmp_path / "bot.sqlite")
+    with session_scope() as session:
+        user = User(chat_id=77)
+        session.add(user)
+        session.flush()
+        user_id = user.id
+        card = CardEntry(
+            user_id=user_id,
+            source_key="link:one",
+            kind="link",
+            title="Saved article",
+            link="https://example.com/article",
+            status="someday",
+            someday_at=datetime.now(timezone.utc),
+        )
+        session.add(card)
+        session.flush()
+        card_id = card.id
+    monkeypatch.setattr(bot_module, "_ensure_user_id", lambda _message: user_id)
+    monkeypatch.setattr(bot_module, "_is_allowed", lambda _chat_id: True)
+    run_ai = AsyncMock()
+    monkeypatch.setattr(bot_module, "_run_ai_summary", run_ai)
+    message = SimpleNamespace(
+        chat=SimpleNamespace(id=77),
+        answer=AsyncMock(),
+        edit_text=AsyncMock(),
+    )
+    asyncio.run(bot_module.cmd_someday(message))
+    markup = message.answer.await_args.kwargs["reply_markup"]
+    buttons = markup.inline_keyboard[0]
+    assert [button.text for button in buttons] == ["✓ 1", "Skip 1", "AI 1"]
+    callback = SimpleNamespace(
+        message=message,
+        data=buttons[2].callback_data,
+        bot=SimpleNamespace(send_message=AsyncMock()),
+        answer=AsyncMock(),
+    )
+    asyncio.run(bot_module.cb_someday(callback))
+    assert run_ai.await_args.args[:3] == (77, "https://example.com/article", None)
+    message.edit_text.assert_not_awaited()
+    with session_scope() as session:
+        assert session.get(CardEntry, card_id).status == "someday"
+
+    choose_card(77, card_id, "done")
+    asyncio.run(bot_module.cb_someday(callback))
+    assert run_ai.await_count == 1
+    callback.answer.assert_awaited_with(
+        "Запись недоступна. Откройте /someday снова.", show_alert=True
+    )
