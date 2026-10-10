@@ -298,7 +298,7 @@ def test_summarize_video_fallbacks_to_description_and_comments(monkeypatch, tmp_
     assert calls["kwargs"]["max_input_words"] == 900
 
 
-def test_summarize_video_fallbacks_to_context_on_request_blocked(monkeypatch, tmp_path):
+def test_summarize_video_fallbacks_to_context_on_request_blocked(monkeypatch, tmp_path, caplog):
     settings = _settings(
         tmp_path,
         AI_SUMMARIZER_MODE="openai",
@@ -340,6 +340,7 @@ def test_summarize_video_fallbacks_to_context_on_request_blocked(monkeypatch, tm
 
     assert result.summary_text == "- Via fallback"
     assert result.summary_basis == "metadata_comments"
+    assert "RequestBlocked: YouTube is blocking requests from your IP" in caplog.text
     assert calls["fetch_kwargs"]["proxy_list_url"].startswith("https://vakhov.github.io")
     assert calls["fetch_kwargs"]["proxy_max_tries"] == 9
 

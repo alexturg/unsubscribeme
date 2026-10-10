@@ -87,6 +87,14 @@ class Settings(BaseSettings):
         default=8,
         description="Per-request timeout for youtube-transcript-api HTTP calls",
     )
+    AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_MIN_INTERVAL_SEC: float = Field(
+        default=10, ge=0,
+        description="Pause between transcript HTTP requests across all commands in one process",
+    )
+    AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_BLOCK_COOLDOWN_SEC: float = Field(
+        default=900, ge=0,
+        description="Stop using a transcript route temporarily after YouTube blocks it",
+    )
     AI_SUMMARIZER_MAX_SENTENCES: int = Field(default=7)
     AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS: int = Field(default=0)
     AI_SUMMARIZER_SAVE_OUTPUT_FILES: bool = Field(

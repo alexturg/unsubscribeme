@@ -446,7 +446,7 @@ async def run_bullshit_detector(
                 BullshitSkippedVideo(
                     video_id=video.video_id,
                     title=video.title,
-                    reason=f"нет субтитров: {str(exc)[:120]}",
+                    reason=f"не удалось получить субтитры: {str(exc)[:500]}",
                 )
             )
             continue
@@ -478,7 +478,7 @@ async def run_bullshit_detector(
                 BullshitSkippedVideo(
                     video_id=video.video_id,
                     title=video.title,
-                    reason=f"ошибка суммаризации: {str(exc)[:120]}",
+                    reason=f"ошибка суммаризации: {str(exc)[:500]}",
                 )
             )
             continue
@@ -495,9 +495,11 @@ async def run_bullshit_detector(
         )
 
     if not analyzed:
+        details = "\n".join(f"{video.video_id}: {video.reason}" for video in skipped[:3])
         raise BullshitDetectorError(
             "Не удалось подготовить суммаризации для анализа. "
             "Проверьте субтитры/доступность видео и ключ OpenAI."
+            + (f"\nПричины:\n{details}" if details else "")
         )
 
     dataset = _format_bullshit_input(analyzed)

@@ -127,6 +127,8 @@ unsubscribeme
 | `AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_LIST_TIMEOUT_SEC` | `8` | Таймаут скачивания списка прокси |
 | `AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_PROXY_MAX_TRIES` | `6` | Сколько прокси пробовать после неудачной прямой попытки |
 | `AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_REQUEST_TIMEOUT_SEC` | `8` | Таймаут одного HTTP-запроса к `youtube-transcript-api` |
+| `AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_MIN_INTERVAL_SEC` | `10` | Пауза после каждого HTTP-запроса субтитров; запросы всех команд в одном процессе выполняются последовательно (`0` отключает паузу) |
+| `AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_BLOCK_COOLDOWN_SEC` | `900` | На сколько секунд исключить прямой адрес или конкретный прокси после `429` / блокировки YouTube (`0` отключает cooldown) |
 | `AI_SUMMARIZER_MAX_SENTENCES` | `7` | Макс. число предложений в summary |
 | `AI_SUMMARIZER_OPENAI_MAX_INPUT_WORDS` | `0` | Лимит слов входа (`0` = без лимита) |
 | `AI_SUMMARIZER_SAVE_OUTPUT_FILES` | `false` | Сохранять артефакты summary на диск |
@@ -160,6 +162,16 @@ unsubscribeme
 | `AI_SUMMARIZER_WEB_MAX_EXTRACTED_WORDS` | `4500` | Лимит слов после очистки HTML |
 
 ### YouTube fallback + Whisper
+
+`/ai`, `/bullshit` и `/transcribe` используют общий ограничитель получения субтитров:
+HTTP-запросы выполняются последовательно с паузой 10 секунд после каждой попытки,
+включая неудачные. После `429` или явной блокировки YouTube прямой адрес или конкретный
+прокси исключается на 15 минут; другие прокси остаются доступны и соблюдают ту же паузу.
+Интервалы задаются переменными `..._MIN_INTERVAL_SEC` и `..._BLOCK_COOLDOWN_SEC` выше.
+Ограничитель работает в пределах одного процесса, его состояние сбрасывается при
+перезапуске. Он снижает частоту обращений, но не снимает уже существующую блокировку.
+Увеличение паузы увеличивает время выполнения команд; учитывайте общий таймаут
+`AI_SUMMARIZER_TIMEOUT_SEC`.
 
 | Переменная | По умолчанию | Описание |
 |---|---:|---|

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass
@@ -298,6 +299,7 @@ def _summarize_sync(
             **transcript_options_from_settings(settings),
         )
     except TranscriptError as exc:
+        logging.warning("YouTube transcript fetch failed for video_id=%s: %s", video_id, exc)
         if not _transcript_error_means_missing_subtitles(exc):
             raise
         return _summarize_youtube_context_fallback(

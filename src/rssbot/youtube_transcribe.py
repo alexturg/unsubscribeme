@@ -7,10 +7,12 @@ import logging
 import re
 import subprocess
 import tempfile
+import threading
+import time
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import parse_qs, urlparse
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional, TypeVar
 
 VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
 WHITESPACE_RE = re.compile(r"\s+")
@@ -28,10 +30,81 @@ TRANSCRIPT_MISSING_MARKERS = (
 PROXY_LIST_MAX_BYTES = 1_200_000
 
 logger = logging.getLogger(__name__)
+_Result = TypeVar("_Result")
 
 
 class TranscriptError(RuntimeError):
     """Raised when transcript fetch fails."""
+
+
+class _TranscriptCooldownError(TranscriptError):
+    """A blocked route is temporarily excluded without making another request."""
+
+
+class _TranscriptRequestLimiter:
+    """Serialize transcript HTTP requests across all commands in this process."""
+
+    def __init__(
+        self, clock: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
+    ) -> None:
+        self._clock = clock or time.monotonic
+        self._sleep = sleeper or time.sleep
+        self._lock = threading.Lock()
+        self._next_request_at = 0.0
+        self._blocked_until: dict[str | None, float] = {}
+
+    def request(
+        self, call: Callable[[], _Result], *, route: str | None,
+        min_interval_sec: float, block_cooldown_sec: float,
+    ) -> _Result:
+        with self._lock:
+            self._check_cooldown(route)
+            delay = self._next_request_at - self._clock()
+            if delay > 0:
+                logger.info("Waiting %.1f seconds before YouTube transcript HTTP request", delay)
+                self._sleep(delay)
+            try:
+                response = call()
+                if getattr(response, "status_code", None) == 429:
+                    self._block(route, block_cooldown_sec)
+                return response
+            finally:
+                self._next_request_at = self._clock() + max(0.0, min_interval_sec)
+
+    def _check_cooldown(self, route: str | None) -> None:
+        remaining = self._blocked_until.get(route, 0.0) - self._clock()
+        if remaining > 0:
+            raise _TranscriptCooldownError(
+                "RequestBlocked: получение субтитров через этот адрес временно "
+                f"приостановлено после блокировки YouTube; повтор через {int(remaining) + 1} сек."
+            )
+
+    def _block(self, route: str | None, cooldown_sec: float) -> None:
+        self._blocked_until[route] = max(
+            self._blocked_until.get(route, 0.0), self._clock() + max(0.0, cooldown_sec)
+        )
+
+    def record_error(
+        self, exc: Exception, *, route: str | None, block_cooldown_sec: float,
+    ) -> None:
+        if isinstance(exc, _TranscriptCooldownError):
+            return
+        message = str(exc).lower()
+        blocked = any(marker in message for marker in (
+            "requestblocked", "ipblocked", "youtube is blocking requests from your ip",
+            "too many requests",
+        )) or re.search(r"\b429\b", message) is not None
+        if blocked:
+            with self._lock:
+                self._block(route, block_cooldown_sec)
+            logger.warning(
+                "YouTube transcript route paused for %.0f seconds after blocking",
+                block_cooldown_sec,
+            )
+
+
+_transcript_limiter = _TranscriptRequestLimiter()
 
 
 class WhisperTranscriptionError(RuntimeError):
@@ -292,7 +365,10 @@ def _build_proxy_candidates(
     return combined
 
 
-def _build_timeout_http_client(request_timeout_sec: int) -> object | None:
+def _build_timeout_http_client(
+    request_timeout_sec: int, *, proxy_url: Optional[str] = None,
+    min_interval_sec: float = 10, block_cooldown_sec: float = 900,
+) -> object | None:
     try:
         import requests
     except Exception:
@@ -307,7 +383,11 @@ def _build_timeout_http_client(request_timeout_sec: int) -> object | None:
 
         def request(self, method, url, **kwargs):
             kwargs.setdefault("timeout", self._default_timeout)
-            return super().request(method, url, **kwargs)
+            return _transcript_limiter.request(
+                lambda: super(_TimeoutSession, self).request(method, url, **kwargs),
+                route=proxy_url, min_interval_sec=min_interval_sec,
+                block_cooldown_sec=block_cooldown_sec,
+            )
 
     return _TimeoutSession(timeout)
 
@@ -348,8 +428,13 @@ def _create_youtube_transcript_api_client(
     proxy_url: Optional[str],
     *,
     request_timeout_sec: int,
+    min_interval_sec: float = 10,
+    block_cooldown_sec: float = 900,
 ) -> object:
-    http_client = _build_timeout_http_client(request_timeout_sec)
+    http_client = _build_timeout_http_client(
+        request_timeout_sec, proxy_url=proxy_url,
+        min_interval_sec=min_interval_sec, block_cooldown_sec=block_cooldown_sec,
+    )
     proxy_kwargs = {"http": proxy_url, "https": proxy_url} if proxy_url else None
 
     try:
@@ -386,11 +471,15 @@ def _fetch_transcript_raw(
     languages: list[str],
     proxy_url: Optional[str],
     request_timeout_sec: int,
+    min_interval_sec: float = 10,
+    block_cooldown_sec: float = 900,
 ) -> object:
     api = _create_youtube_transcript_api_client(
         api_class,
         proxy_url,
         request_timeout_sec=request_timeout_sec,
+        min_interval_sec=min_interval_sec,
+        block_cooldown_sec=block_cooldown_sec,
     )
     if hasattr(api, "fetch"):
         return _call_with_languages_and_optional_proxies(
@@ -401,19 +490,24 @@ def _fetch_transcript_raw(
         )
 
     if hasattr(api, "get_transcript"):
-        return _call_with_languages_and_optional_proxies(
-            getattr(api, "get_transcript"),
-            video_id=video_id,
-            languages=languages,
-            proxy_url=proxy_url,
+        # Legacy static APIs create their own HTTP session, so throttle the whole call.
+        return _transcript_limiter.request(
+            lambda: _call_with_languages_and_optional_proxies(
+                getattr(api, "get_transcript"), video_id=video_id,
+                languages=languages, proxy_url=proxy_url,
+            ),
+            route=proxy_url, min_interval_sec=min_interval_sec,
+            block_cooldown_sec=block_cooldown_sec,
         )
 
     if hasattr(api_class, "get_transcript"):
-        return _call_with_languages_and_optional_proxies(
-            getattr(api_class, "get_transcript"),
-            video_id=video_id,
-            languages=languages,
-            proxy_url=proxy_url,
+        return _transcript_limiter.request(
+            lambda: _call_with_languages_and_optional_proxies(
+                getattr(api_class, "get_transcript"), video_id=video_id,
+                languages=languages, proxy_url=proxy_url,
+            ),
+            route=proxy_url, min_interval_sec=min_interval_sec,
+            block_cooldown_sec=block_cooldown_sec,
         )
 
     raise RuntimeError("Unsupported youtube-transcript-api interface: missing fetch/get_transcript")
@@ -435,6 +529,12 @@ def transcript_options_from_settings(settings: object) -> dict[str, object]:
             1,
             int(getattr(settings, "AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_REQUEST_TIMEOUT_SEC", 8)),
         ),
+        "min_interval_sec": max(0.0, float(getattr(
+            settings, "AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_MIN_INTERVAL_SEC", 10,
+        ))),
+        "block_cooldown_sec": max(0.0, float(getattr(
+            settings, "AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_BLOCK_COOLDOWN_SEC", 900,
+        ))),
     }
 
 
@@ -447,6 +547,8 @@ def fetch_transcript(
     proxy_list_timeout_sec: int = 8,
     proxy_max_tries: int = 6,
     request_timeout_sec: int = 8,
+    min_interval_sec: float = 10,
+    block_cooldown_sec: float = 900,
 ) -> list[TranscriptSegment]:
     normalized_languages = [lang.strip() for lang in languages if lang.strip()]
     if not normalized_languages:
@@ -467,9 +569,12 @@ def fetch_transcript(
             languages=normalized_languages,
             proxy_url=None,
             request_timeout_sec=max(1, int(request_timeout_sec)),
+            min_interval_sec=min_interval_sec,
+            block_cooldown_sec=block_cooldown_sec,
         )
     except Exception as exc:  # pragma: no cover - external API errors are runtime-dependent
         last_error = exc
+        _transcript_limiter.record_error(exc, route=None, block_cooldown_sec=block_cooldown_sec)
 
     if last_error is None:
         segments = _normalize_segments(raw_segments)
@@ -511,6 +616,8 @@ def fetch_transcript(
                 languages=normalized_languages,
                 proxy_url=proxy_url,
                 request_timeout_sec=max(1, int(request_timeout_sec)),
+                min_interval_sec=min_interval_sec,
+                block_cooldown_sec=block_cooldown_sec,
             )
             segments = _normalize_segments(raw_segments)
             if not segments:
@@ -526,6 +633,7 @@ def fetch_transcript(
             return segments
         except Exception as exc:  # pragma: no cover - external API errors are runtime-dependent
             last_error = exc
+            _transcript_limiter.record_error(exc, route=proxy_url, block_cooldown_sec=block_cooldown_sec)
             proxy_attempts += 1
             message = _normalize_space(str(exc))[:220] or "Unknown error"
             logger.info(

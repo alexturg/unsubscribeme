@@ -754,7 +754,7 @@ async def _run_ai_summary(
 
     if result.summary_basis == "metadata_comments":
         status_line = (
-            "Субтитры не найдены. Ниже предварительная краткая сводка по описанию и комментариям."
+            "Не удалось получить субтитры. Ниже предварительная краткая сводка по описанию и комментариям."
         )
     elif result.summary_basis == "whisper":
         status_line = "Суммаризация готова по транскрипции Whisper."
@@ -854,7 +854,7 @@ async def _run_ai_summary_in_card(
             await message.edit_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
             return
         if result.summary_basis == "metadata_comments":
-            status = "Субтитры не найдены. Предварительная сводка по описанию и комментариям."
+            status = "Не удалось получить субтитры. Предварительная сводка по описанию и комментариям."
         elif result.summary_basis == "whisper":
             status = "Суммаризация готова по транскрипции Whisper."
         else:
@@ -1072,7 +1072,8 @@ async def cmd_transcribe(message: Message) -> None:
         details = _video_info_text(info_title, info_duration, video_id)
         await message.answer(
             html_escape(
-                "Субтитры у видео не найдены.\n"
+                "Не удалось получить субтитры видео.\n"
+                f"Причина: {str(exc)[:700]}\n"
                 "Можно сделать транскрипцию через Whisper (OpenAI).\n"
                 f"{details}",
                 quote=False,
