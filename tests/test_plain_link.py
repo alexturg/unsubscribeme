@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from rssbot import bot
+from rssbot import ai_summarizer
 from rssbot.db import CardEntry, CardMessage, User, init_engine, session_scope
 
 
@@ -111,3 +112,26 @@ def test_title_lookup_failure_falls_back_to_host(tmp_path, monkeypatch):
     asyncio.run(bot.cmd_plain_link(message))
     assert '>example.com</a>' in message.answer.await_args.args[0]
     message.delete.assert_awaited_once()
+
+
+def test_reddit_title_uses_same_source_budget_and_cache_as_summary(tmp_path, monkeypatch):
+    settings = SimpleNamespace(
+        AI_SUMMARIZER_MODE="extractive", AI_SUMMARIZER_WEB_FETCH_TIMEOUT_SEC=15,
+        AI_SUMMARIZER_WEB_MAX_RESPONSE_BYTES=4_000_000,
+        AI_SUMMARIZER_WEB_MAX_EXTRACTED_WORDS=20_000,
+        AI_SUMMARIZER_OUTPUT_DIR=tmp_path,
+    )
+    monkeypatch.setattr(bot, "DEPS", SimpleNamespace(settings=settings))
+    calls = []
+    def fetch(url, **kwargs):
+        calls.append((url, kwargs))
+        return SimpleNamespace(title="Post", source_url=url, cleaned_text="Complete post text.")
+    monkeypatch.setattr(bot, "fetch_webpage_content", fetch)
+    monkeypatch.setattr(ai_summarizer, "fetch_webpage_content", fetch)
+    monkeypatch.setattr(ai_summarizer, "_summarize_source_text_by_mode", lambda *a, **k: "Summary")
+    url = "https://www.reddit.com/r/boardgames/s/RktBVVUaTw"
+    assert asyncio.run(bot._page_title_for_link(url)) == "Post"
+    ai_summarizer._summarize_web_sync(settings, page_url=url, custom_prompt=None)
+    for option in ("max_bytes", "max_words", "cache_dir"):
+        assert calls[0][1][option] == calls[1][1][option]
+    assert calls[0][1]["max_words"] == 20_000

@@ -40,6 +40,7 @@ REDDIT_HOST_ALIASES = {
 }
 MAX_REDDIT_COMMENTS = 32
 REDDIT_SHARE_REDIRECT_USER_AGENT = "Twitterbot"
+REDDIT_RSS_USER_AGENT = "UnsubscribeMe/0.1 (+https://github.com/alexturg/unsubscribeme)"
 REDDIT_BLOCK_PATTERNS = (
     "you've been blocked by network security",
     "you are unable to access reddit",
@@ -357,6 +358,21 @@ def _reddit_redirect_url(current_url: str, location: str) -> str:
         if re.match(r"/r/[^/]+/comments/[^/]+(?:/|$)", parsed.path, flags=re.IGNORECASE):
             return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
     return target
+
+
+def _reddit_post_feed_url(url: str) -> str:
+    parsed = urlsplit(url)
+    if not _is_reddit_host(parsed.hostname):
+        return url
+    if not re.match(r"/(?:r/[^/]+/)?comments/[a-z0-9]+(?:/|$)", parsed.path, re.IGNORECASE):
+        return url
+    if parsed.path.lower().endswith((".json", ".rss")):
+        return url
+    query = urlencode([
+        (key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.lower() not in {"raw_json", "share_id"} and not key.lower().startswith("utm_")
+    ])
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/") + "/.rss", query, ""))
 
 
 def _next_reddit_fallback_url(current_url: str) -> str | None:
@@ -858,7 +874,14 @@ def fetch_webpage_content(
                 except (OSError, ValueError, KeyError, TypeError):
                     pass
             return cached_page
-        request = urllib.request.Request(current_url, headers=request_headers, method="GET")
+        current_url = _reddit_post_feed_url(current_url)
+        headers = dict(request_headers)
+        if _is_reddit_host(urlsplit(current_url).hostname) and urlsplit(current_url).path.lower().endswith(".rss"):
+            headers["User-Agent"] = REDDIT_RSS_USER_AGENT
+            headers["Accept"] = "application/atom+xml,application/rss+xml"
+        elif _is_reddit_share_url(current_url):
+            headers["User-Agent"] = REDDIT_SHARE_REDIRECT_USER_AGENT
+        request = urllib.request.Request(current_url, headers=headers, method="GET")
 
         try:
             with _open_web_request(opener, request, timeout_sec) as response:

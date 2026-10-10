@@ -17,6 +17,7 @@ from rssbot.web_summarize import (
     WebSummarizationError,
     WebPageContent,
     DEFAULT_USER_AGENT,
+    REDDIT_RSS_USER_AGENT,
     extract_readable_text,
     fetch_webpage_content,
     normalize_web_url,
@@ -151,7 +152,8 @@ def test_reddit_rate_limit_retry_is_bounded(monkeypatch, retry_after, expected_c
 
 
 @pytest.mark.parametrize("share_get_status", [301, 403, 429])
-def test_fetch_webpage_content_resolves_reddit_share_url(monkeypatch, tmp_path, share_get_status):
+@pytest.mark.parametrize("use_share_url", [True, False])
+def test_fetch_webpage_content_resolves_reddit_share_url(monkeypatch, tmp_path, share_get_status, use_share_url):
     share_url = "https://www.reddit.com/r/Ingress/s/BGHThr4vvc"
     canonical_url = (
         "https://www.reddit.com/r/Ingress/comments/1x0qg70/"
@@ -161,11 +163,11 @@ def test_fetch_webpage_content_resolves_reddit_share_url(monkeypatch, tmp_path, 
     calls = []
 
     class FakeResponse:
-        headers = {"Content-Type": "text/html; charset=utf-8"}
+        headers = {"Content-Type": "application/atom+xml; charset=utf-8"}
 
         def __init__(self, url):
             self.url = url
-            self.payload = b"<html><title>Ingress post</title><article>Agent account discussion.</article></html>"
+            self.payload = b'<feed xmlns="http://www.w3.org/2005/Atom"><title>Ingress post</title><entry><summary>Agent account discussion.</summary></entry></feed>'
 
         def geturl(self):
             return self.url
@@ -191,8 +193,10 @@ def test_fetch_webpage_content_resolves_reddit_share_url(monkeypatch, tmp_path, 
                         share_url, 301, "Moved", hdrs={"Location": redirect_url}, fp=None
                     )
                 raise urllib.error.HTTPError(share_url, share_get_status, "Blocked", hdrs={}, fp=None)
-            assert request.full_url == canonical_url
-            return FakeResponse(canonical_url)
+            assert request.full_url == canonical_url + ".rss"
+            assert request.get_header("User-agent") == REDDIT_RSS_USER_AGENT
+            assert request.get_header("Accept") == "application/atom+xml,application/rss+xml"
+            return FakeResponse(request.full_url)
 
     def fake_getaddrinfo(host, port, type=None):
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
@@ -204,20 +208,28 @@ def test_fetch_webpage_content_resolves_reddit_share_url(monkeypatch, tmp_path, 
     monkeypatch.setattr("rssbot.web_summarize.socket.getaddrinfo", fake_getaddrinfo)
     monkeypatch.setattr("rssbot.web_summarize.time.sleep", lambda _delay: None)
 
-    page = fetch_webpage_content(share_url, cache_dir=tmp_path)
+    page = fetch_webpage_content(share_url if use_share_url else canonical_url, cache_dir=tmp_path)
 
-    assert page.source_url == canonical_url
+    assert page.source_url == canonical_url + ".rss"
     assert "Agent account discussion." in page.cleaned_text
-    assert calls[-1] == ("GET", canonical_url)
+    assert calls[-1] == ("GET", canonical_url + ".rss")
+    if not use_share_url:
+        assert len(calls) == 1
     assert all("old.reddit.com" not in url for _, url in calls)
     request_count = len(calls)
     assert fetch_webpage_content(canonical_url) == page
     assert fetch_webpage_content(share_url) == page
-    assert len(calls) == request_count
+    if use_share_url:
+        assert len(calls) == request_count
+    # A newly seen share alias still needs to resolve once, but never refetches RSS.
+    assert sum(url.endswith(".rss") for _, url in calls) == 1
+    fetch_webpage_content(share_url, cache_dir=tmp_path)
+    request_count = len(calls)
     _REDDIT_CONTENT_CACHE.clear()
     assert fetch_webpage_content(canonical_url, cache_dir=tmp_path) == page
-    assert fetch_webpage_content(share_url, cache_dir=tmp_path) == page
-    assert len(calls) == request_count
+    if use_share_url:
+        assert fetch_webpage_content(share_url, cache_dir=tmp_path) == page
+        assert len(calls) == request_count
 
 
 @pytest.mark.parametrize("age", [0, 600, 90000])
@@ -438,13 +450,13 @@ def test_fetch_webpage_content_reddit_403_fallbacks_to_old_and_json(monkeypatch)
     monkeypatch.setattr("rssbot.web_summarize.socket.getaddrinfo", fake_getaddrinfo)
 
     page = fetch_webpage_content(
-        "https://www.reddit.com/r/Ingress/comments/1rp5w63/pausing_opr_and_retiring_overclock/"
+        "https://www.reddit.com/r/Ingress/"
     )
 
     assert calls[0].startswith("https://www.reddit.com/")
     assert calls[1].startswith("https://old.reddit.com/")
-    assert calls[2].endswith("pausing_opr_and_retiring_overclock.json?raw_json=1")
-    assert page.source_url.endswith("pausing_opr_and_retiring_overclock.json?raw_json=1")
+    assert calls[2].endswith("/Ingress.json?raw_json=1")
+    assert page.source_url.endswith("/Ingress.json?raw_json=1")
     assert "Subreddit: r/Ingress" in page.cleaned_text
     assert "Comment 1: This will affect medal progress for many players." in page.cleaned_text
 
@@ -508,13 +520,13 @@ def test_fetch_webpage_content_reddit_block_fallbacks_to_rss(monkeypatch, blocke
     monkeypatch.setattr("rssbot.web_summarize.time.sleep", lambda _delay: None)
 
     page = fetch_webpage_content(
-        "https://www.reddit.com/r/Ingress/comments/1rp5w63/pausing_opr_and_retiring_overclock/"
+        "https://old.reddit.com/r/Ingress/comments/1rp5w63/pausing_opr_and_retiring_overclock.json?raw_json=1"
     )
 
     distinct_calls = list(dict.fromkeys(calls))
-    assert distinct_calls[0].startswith("https://www.reddit.com/")
-    assert distinct_calls[1].startswith("https://old.reddit.com/")
-    assert ".json?raw_json=1" in distinct_calls[2]
-    assert distinct_calls[3].startswith("https://www.reddit.com/")
-    assert distinct_calls[3].endswith("/.rss")
+    assert len(distinct_calls) == 2
+    assert distinct_calls[0].startswith("https://old.reddit.com/")
+    assert ".json?raw_json=1" in distinct_calls[0]
+    assert distinct_calls[1].startswith("https://www.reddit.com/")
+    assert distinct_calls[1].endswith("/.rss")
     assert "Pausing OPR and retiring Overclock" in page.cleaned_text

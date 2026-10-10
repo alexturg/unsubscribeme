@@ -42,7 +42,7 @@ from .cards import (
 )
 from .scheduler import BotScheduler, is_digest_source
 from .rss import fetch_and_store_event_source, fetch_and_store_latest_item
-from .web_summarize import fetch_webpage_content
+from .web_summarize import _is_reddit_host, fetch_webpage_content
 from .ai_summarizer import (
     AiSummarizerError,
     parse_ai_request_text,
@@ -533,16 +533,27 @@ def _single_http_link(raw_text: str) -> Optional[str]:
 
 async def _page_title_for_link(link: str) -> str:
     fallback = (urlparse(link).hostname or link).strip()
+    options = {"timeout_sec": 3, "max_bytes": 256_000, "max_words": 30}
+    title_timeout = 4
+    if _is_reddit_host(urlparse(link).hostname):
+        # Keep the same extraction budget and persistent cache as /ai, so a
+        # successful title lookup also supplies the source for the summary.
+        settings = DEPS.settings
+        options = {
+            "timeout_sec": min(8, max(3, int(getattr(settings, "AI_SUMMARIZER_WEB_FETCH_TIMEOUT_SEC", 15)))),
+            "max_bytes": max(200_000, int(getattr(settings, "AI_SUMMARIZER_WEB_MAX_RESPONSE_BYTES", 2_000_000))),
+            "max_words": max(320, int(getattr(settings, "AI_SUMMARIZER_WEB_MAX_EXTRACTED_WORDS", 4500))),
+            "cache_dir": getattr(settings, "AI_SUMMARIZER_OUTPUT_DIR", Path("data/ai_summaries")) / "web_cache",
+        }
+        title_timeout = 12
     try:
         page = await asyncio.wait_for(
             asyncio.to_thread(
                 fetch_webpage_content,
                 link,
-                timeout_sec=3,
-                max_bytes=256_000,
-                max_words=30,
+                **options,
             ),
-            timeout=4,
+            timeout=title_timeout,
         )
         return (page.title or "").strip()[:500] or fallback
     except Exception as exc:
