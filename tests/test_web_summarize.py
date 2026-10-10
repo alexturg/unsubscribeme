@@ -2,6 +2,10 @@ import json
 import socket
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
+import threading
+import time
 
 import pytest
 
@@ -115,6 +119,36 @@ def test_next_reddit_fallback_url_does_not_rewrite_share_path():
     assert _next_reddit_fallback_url("https://www.reddit.com/r/Ingress/s/BGHThr4vvc") is None
 
 
+def test_concurrent_reddit_fetches_reuse_the_first_download(monkeypatch):
+    url = "https://www.reddit.com/r/PlannerAddicts/comments/1x25ecl/post/"
+    first_started = threading.Event()
+    second_started = threading.Event()
+    calls = []
+    class Response(BytesIO):
+        headers = {"Content-Type": "application/atom+xml"}
+        def geturl(self):
+            return url + ".rss"
+    class Opener:
+        def open(self, request, timeout=None):
+            calls.append(request.full_url)
+            first_started.set()
+            assert second_started.wait(2)
+            time.sleep(0.05)
+            return Response(b'<feed xmlns="http://www.w3.org/2005/Atom"><title>Post</title><entry><summary>Full source text.</summary></entry></feed>')
+    monkeypatch.setattr("rssbot.web_summarize.urllib.request.build_opener", lambda *_: Opener())
+    monkeypatch.setattr("rssbot.web_summarize.socket.getaddrinfo",
+                        lambda host, port, type=None: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))])
+    def second_fetch():
+        second_started.set()
+        return fetch_webpage_content(url)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(fetch_webpage_content, url)
+        assert first_started.wait(2)
+        second = executor.submit(second_fetch)
+        assert first.result(timeout=3) == second.result(timeout=3)
+    assert calls == [url + ".rss"]
+
+
 def test_reddit_rate_limit_retries_same_request_once(monkeypatch):
     request = urllib.request.Request("https://www.reddit.com/r/Ingress/comments/abc/.rss")
     calls = []
@@ -134,7 +168,7 @@ def test_reddit_rate_limit_retries_same_request_once(monkeypatch):
     assert pauses == [3.0]
 
 
-@pytest.mark.parametrize("retry_after,expected_calls", [(None, 2), ("60", 1)])
+@pytest.mark.parametrize("retry_after,expected_calls", [(None, 2), ("120", 1)])
 def test_reddit_rate_limit_retry_is_bounded(monkeypatch, retry_after, expected_calls):
     request = urllib.request.Request("https://www.reddit.com/r/Ingress/comments/abc/.rss")
     calls = []
@@ -145,10 +179,12 @@ def test_reddit_rate_limit_retry_is_bounded(monkeypatch, retry_after, expected_c
             headers = {"Retry-After": retry_after} if retry_after else {}
             raise urllib.error.HTTPError(req.full_url, 429, "Limited", headers, None)
 
-    monkeypatch.setattr("rssbot.web_summarize.time.sleep", lambda _delay: None)
+    pauses = []
+    monkeypatch.setattr("rssbot.web_summarize.time.sleep", pauses.append)
     with pytest.raises(urllib.error.HTTPError):
         _open_web_request(FakeOpener(), request, 15)
     assert len(calls) == expected_calls
+    assert pauses == ([60] if retry_after is None else [])
 
 
 @pytest.mark.parametrize("share_get_status", [301, 403, 429])

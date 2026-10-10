@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import wraps
 from html.parser import HTMLParser
 import hashlib
 import ipaddress
@@ -116,6 +117,20 @@ class WebPageContent:
 
 _REDDIT_CONTENT_CACHE: dict[tuple, tuple[float, WebPageContent]] = {}
 _REDDIT_CACHE_LOCK = threading.Lock()
+_REDDIT_FETCH_LOCK = threading.RLock()
+
+
+def _serialize_reddit_fetch(fetch):
+    @wraps(fetch)
+    def wrapped(raw_url, *args, **kwargs):
+        url = normalize_web_url(raw_url)
+        if _is_reddit_host(urlsplit(url).hostname):
+            # Recheck caches inside the lock: a title lookup may still be
+            # fetching when the user starts /ai for the same post.
+            with _REDDIT_FETCH_LOCK:
+                return fetch(url, *args, **kwargs)
+        return fetch(url, *args, **kwargs)
+    return wrapped
 
 
 def _reddit_content_cache_key(url: str, max_bytes: int, max_words: int, user_agent: str):
@@ -816,20 +831,24 @@ def _open_web_request(opener, request: urllib.request.Request, timeout_sec: int)
         if exc.code != 429 or not _is_reddit_host(urlsplit(request.full_url).hostname):
             raise
         retry_after = exc.headers.get("Retry-After") if exc.headers else None
+        is_rss = urlsplit(request.full_url).path.lower().endswith(".rss")
+        max_delay = 60 if is_rss else 5
         try:
-            delay = max(1, int(retry_after)) if retry_after else 2
+            delay = max(1, int(retry_after)) if retry_after else (60 if is_rss else 2)
         except ValueError:
             raise exc
         # Keep the retry within the summarizer's overall timeout. Longer limits
         # must be reported rather than repeatedly requesting the same endpoint.
-        if delay > 5:
+        if delay > max_delay:
             raise
         if exc.fp is not None:
             exc.close()
+        logging.info("Reddit returned 429; retrying once in %s seconds", delay)
         time.sleep(delay)
         return opener.open(request, timeout=timeout_sec)
 
 
+@_serialize_reddit_fetch
 def fetch_webpage_content(
     raw_url: str,
     *,
