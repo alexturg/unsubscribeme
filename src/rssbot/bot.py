@@ -1411,7 +1411,11 @@ async def cmd_someday(message: Message) -> None:
         await message.answer("Доступ запрещён.")
         return
     view_id = start_someday_view(user_id)
-    await _show_someday_page(message, user_id, view_id, 1, edit=False)
+    if await _show_someday_page(message, user_id, view_id, 1, edit=False):
+        try:
+            await message.delete()
+        except Exception as exc:
+            logging.debug("Could not delete /someday command message: %s", exc)
 
 
 @router.callback_query(F.data.startswith("sm:"))

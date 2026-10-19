@@ -204,6 +204,7 @@ def test_someday_command_more_back_and_finish_in_one_message(tmp_path, monkeypat
             self.markup = None
             self.answer = AsyncMock(side_effect=self._answer)
             self.edit_text = AsyncMock(side_effect=self._edit)
+            self.delete = AsyncMock()
 
         async def _answer(self, text, reply_markup):
             self.text, self.markup = text, reply_markup
@@ -220,6 +221,7 @@ def test_someday_command_more_back_and_finish_in_one_message(tmp_path, monkeypat
 
     message = Message()
     asyncio.run(bot_module.cmd_someday(message))
+    message.delete.assert_awaited_once()
     assert "страница 1" in message.text
     more = message.markup.inline_keyboard[-1][-1].callback_data
     assert more.startswith("sm:m:")
@@ -286,8 +288,10 @@ def test_someday_ai_button_summarizes_link_and_keeps_item(tmp_path, monkeypatch)
         chat=SimpleNamespace(id=77),
         answer=AsyncMock(),
         edit_text=AsyncMock(),
+        delete=AsyncMock(),
     )
     asyncio.run(bot_module.cmd_someday(message))
+    message.delete.assert_awaited_once()
     markup = message.answer.await_args.kwargs["reply_markup"]
     buttons = markup.inline_keyboard[0]
     assert [button.text for button in buttons] == ["✓ 1", "Skip 1", "AI 1"]
