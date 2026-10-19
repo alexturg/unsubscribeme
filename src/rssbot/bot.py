@@ -43,6 +43,7 @@ from .cards import (
 from .scheduler import BotScheduler, is_digest_source
 from .rss import fetch_and_store_event_source, fetch_and_store_latest_item
 from .web_summarize import _is_reddit_host, fetch_webpage_content
+from .youtube_context import fetch_video_title
 from .ai_summarizer import (
     AiSummarizerError,
     parse_ai_request_text,
@@ -533,6 +534,23 @@ def _single_http_link(raw_text: str) -> Optional[str]:
 
 async def _page_title_for_link(link: str) -> str:
     fallback = (urlparse(link).hostname or link).strip()
+    host = fallback.lower()
+    if (
+        host in {"youtu.be", "www.youtu.be", "youtube.com", "youtube-nocookie.com"}
+        or host.endswith((".youtube.com", ".youtube-nocookie.com"))
+    ):
+        try:
+            video_id = extract_video_id(link)
+        except ValueError:
+            pass
+        else:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(fetch_video_title, video_id, timeout_sec=3), timeout=4,
+                )
+            except Exception as exc:
+                logging.debug("Could not read YouTube video title for %s: %s", video_id, exc)
+                link = f"https://www.youtube.com/watch?v={video_id}"
     options = {"timeout_sec": 3, "max_bytes": 256_000, "max_words": 30}
     title_timeout = 4
     if _is_reddit_host(urlparse(link).hostname):

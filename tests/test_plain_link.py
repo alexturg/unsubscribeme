@@ -1,9 +1,14 @@
 import asyncio
+import json
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import AsyncMock
+
+import pytest
 
 from rssbot import bot
 from rssbot import ai_summarizer
+from rssbot import youtube_context
 from rssbot.db import CardEntry, CardMessage, User, init_engine, session_scope
 
 
@@ -16,6 +21,7 @@ def _setup(tmp_path, monkeypatch):
         user_id = user.id
     monkeypatch.setattr(bot, "_ensure_user_id", lambda _message: user_id)
     monkeypatch.setattr(bot, "_is_allowed", lambda _chat_id: True)
+    monkeypatch.setattr(bot, "fetch_video_title", lambda *_args, **_kwargs: "Page <Title> & more")
     monkeypatch.setattr(
         bot,
         "fetch_webpage_content",
@@ -135,3 +141,62 @@ def test_reddit_title_uses_same_source_budget_and_cache_as_summary(tmp_path, mon
     for option in ("max_bytes", "max_words", "cache_dir"):
         assert calls[0][1][option] == calls[1][1][option]
     assert calls[0][1]["max_words"] == 20_000
+
+
+@pytest.mark.parametrize("url", [
+    "https://youtu.be/ia2QItAmyE8?si=shared",
+    "https://www.youtube.com/watch?v=ia2QItAmyE8&pp=tracking",
+    "https://www.youtube.com/shorts/ia2QItAmyE8",
+])
+def test_youtube_title_lookup_uses_video_id(monkeypatch, url):
+    calls = []
+
+    def title(video_id, **kwargs):
+        calls.append(video_id)
+        return "Название видео"
+
+    monkeypatch.setattr(bot, "fetch_video_title", title)
+    assert asyncio.run(bot._page_title_for_link(url)) == "Название видео"
+    assert calls == ["ia2QItAmyE8"]
+
+
+def test_youtube_title_failure_tries_canonical_watch_page(monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("oEmbed unavailable")
+
+    calls = []
+
+    def page(url, **kwargs):
+        calls.append(url)
+        return SimpleNamespace(title="Название со страницы")
+
+    monkeypatch.setattr(bot, "fetch_video_title", unavailable)
+    monkeypatch.setattr(bot, "fetch_webpage_content", page)
+    assert asyncio.run(bot._page_title_for_link("https://youtu.be/ia2QItAmyE8?si=x")) == "Название со страницы"
+    assert calls == ["https://www.youtube.com/watch?v=ia2QItAmyE8"]
+
+
+def test_youtube_oembed_title_reads_metadata_and_normalizes_spaces(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, limit):
+            assert limit == 32_000
+            return json.dumps({"title": "  Название\nвидео & текст  "}).encode()
+
+    def urlopen(request, timeout):
+        url = urlparse(request.full_url)
+        assert url.hostname == "www.youtube.com"
+        assert url.path == "/oembed"
+        assert parse_qs(url.query) == {
+            "url": ["https://www.youtube.com/watch?v=ia2QItAmyE8"], "format": ["json"],
+        }
+        assert timeout == 3
+        return Response()
+
+    monkeypatch.setattr(youtube_context.urllib.request, "urlopen", urlopen)
+    assert youtube_context.fetch_video_title("ia2QItAmyE8") == "Название видео & текст"

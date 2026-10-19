@@ -5,6 +5,7 @@ import json
 import re
 import urllib.error
 import urllib.request
+from urllib.parse import urlencode
 
 
 DEFAULT_USER_AGENT = (
@@ -32,6 +33,22 @@ PLAYER_RESPONSE_MARKERS = (
 
 class VideoContextError(RuntimeError):
     """Raised when fallback YouTube context could not be extracted."""
+
+
+def fetch_video_title(video_id: str, *, timeout_sec: int = 3) -> str:
+    """Read lightweight video metadata without fetching captions or the watch page."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        raise VideoContextError("Invalid YouTube video ID")
+    query = urlencode({"url": f"https://www.youtube.com/watch?v={video_id}", "format": "json"})
+    request = urllib.request.Request(
+        f"https://www.youtube.com/oembed?{query}", headers={"User-Agent": DEFAULT_USER_AGENT},
+    )
+    with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        data = json.loads(response.read(32_000).decode("utf-8"))
+    title = data.get("title") if isinstance(data, dict) else None
+    if not isinstance(title, str) or not title.strip():
+        raise VideoContextError("YouTube returned no video title")
+    return _normalize_space(title)[:500]
 
 
 @dataclass(frozen=True)
