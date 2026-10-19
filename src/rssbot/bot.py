@@ -44,7 +44,7 @@ from .scheduler import BotScheduler, is_digest_source
 from .digest_schedule import digest_day_label, parse_digest_day
 from .rss import fetch_and_store_event_source, fetch_and_store_latest_item
 from .web_summarize import _is_reddit_host, fetch_webpage_content
-from .youtube_context import fetch_video_title
+from .youtube_context import fetch_video_metadata, fetch_video_title
 from .ai_summarizer import (
     AiSummarizerError,
     parse_ai_request_text,
@@ -583,6 +583,57 @@ async def _page_title_for_link(link: str) -> str:
         return fallback
 
 
+async def _link_card_details(link: str) -> tuple[str, Optional[str]]:
+    host = (urlparse(link).hostname or "").lower()
+    if host in {"youtu.be", "www.youtu.be", "youtube.com", "youtube-nocookie.com"} or host.endswith(
+        (".youtube.com", ".youtube-nocookie.com")
+    ):
+        try:
+            video_id = extract_video_id(link)
+            metadata = await asyncio.wait_for(
+                asyncio.to_thread(fetch_video_metadata, video_id, timeout_sec=3), timeout=4,
+            )
+        except Exception:
+            pass
+        else:
+            channel_id = None
+            if metadata.channel_url:
+                try:
+                    channel_id = await asyncio.wait_for(
+                        asyncio.to_thread(get_channel_id, metadata.channel_url, timeout=3), timeout=4,
+                    )
+                except Exception:
+                    logging.debug("Could not resolve YouTube channel for %s", video_id)
+            if not _looks_like_channel_id(channel_id or ""):
+                channel_id = None
+            return metadata.title, channel_id
+    return await _page_title_for_link(link), None
+
+
+def _channel_feed(session: Session, user_id: int, channel_id: str) -> Optional[Feed]:
+    # Compare channel IDs, so equivalent RSS URLs do not create duplicate subscriptions.
+    feeds = session.query(Feed).filter(Feed.user_id == user_id).order_by(Feed.enabled.desc(), Feed.id.asc())
+    for feed in feeds:
+        parsed = urlparse(feed.url)
+        host = (parsed.hostname or "").lower()
+        if (host == "youtube.com" or host.endswith(".youtube.com")) and (
+            parse_qs(parsed.query).get("channel_id") == [channel_id]
+        ):
+            return feed
+    return None
+
+
+def _subscription_rows(card_id: int) -> list[list[InlineKeyboardButton]]:
+    with session_scope() as session:
+        card = session.get(CardEntry, card_id)
+        if card is None or not card.youtube_channel_id:
+            return []
+        feed = _channel_feed(session, card.user_id, card.youtube_channel_id)
+        if feed is not None and feed.enabled:
+            return []
+    return [[InlineKeyboardButton(text="Подписаться", callback_data=f"subscribe:card:{card_id}")]]
+
+
 def _looks_like_channel_id(value: str) -> bool:
     return bool(YOUTUBE_CHANNEL_ID_RE.fullmatch((value or "").strip()))
 
@@ -833,7 +884,7 @@ def _ai_card_page(title, link, body, card_id, page=0, extra_rows=None):
         rows.append(buttons)
     counter = f"\n\n{page + 1}/{len(chunks)}" if len(chunks) > 1 else ""
     text = f"{linked_title(label, link)}\n\n{html_escape(chunks[page], quote=False)}{counter}"
-    return text, choice_keyboard(card_id, rows)
+    return text, choice_keyboard(card_id, rows + _subscription_rows(card_id))
 
 
 async def _run_ai_summary_in_card(
@@ -1689,6 +1740,60 @@ async def cb_ai_whisper(callback: CallbackQuery) -> None:
     )
 
 
+@router.callback_query(F.data.startswith("subscribe:card:"))
+async def cb_subscribe_card(callback: CallbackQuery) -> None:
+    message = callback.message
+    if message is None or not _is_allowed(message.chat.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    try:
+        card_id = int((callback.data or "").removeprefix("subscribe:card:"))
+    except ValueError:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    with session_scope() as session:
+        user = session.query(User).filter(User.chat_id == message.chat.id).first()
+        card = session.get(CardEntry, card_id)
+        if user is None or card is None or card.user_id != user.id or not _looks_like_channel_id(
+            card.youtube_channel_id or ""
+        ):
+            await callback.answer("Запись недоступна.", show_alert=True)
+            return
+        user_id, channel_id = user.id, card.youtube_channel_id
+        feed = _channel_feed(session, user_id, channel_id)
+        existing = feed is not None
+        already_enabled = existing and feed.enabled
+        if existing:
+            feed.enabled = True
+            feed_id, interval = feed.id, feed.poll_interval_min
+    await callback.answer("Уже подписаны." if already_enabled else "Подписываю…")
+    try:
+        if existing:
+            if not already_enabled:
+                DEPS.scheduler.schedule_feed_poll(feed_id, interval)
+        else:
+            await _create_feed_and_seed_reply(
+                message, user_id,
+                f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}",
+                "immediate", None, DEPS.settings.DEFAULT_POLL_INTERVAL_MIN, None,
+            )
+    except Exception:
+        logging.exception("Could not subscribe from card %s", card_id)
+        await message.answer("Не удалось завершить подписку. Попробуй ещё раз.")
+        return
+    rows = [
+        [button for button in row if not (button.callback_data or "").startswith("subscribe:card:")]
+        for row in (message.reply_markup.inline_keyboard if message.reply_markup else [])
+    ]
+    try:
+        await message.edit_reply_markup(
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[row for row in rows if row])
+        )
+    except Exception as exc:
+        if "message is not modified" not in str(exc).lower():
+            logging.debug("Could not remove subscription button from card %s", card_id)
+
+
 @router.message(Command("youtube"))
 async def cmd_youtube(message: Message) -> None:
     """Добавить ленту YouTube по ссылке на канал.
@@ -2465,13 +2570,15 @@ async def cmd_plain_link(message: Message) -> None:
     if user_id is None:
         await message.answer("Доступ запрещён.")
         return
-    title = await _page_title_for_link(link)
-    card_id = ensure_link_card(message.chat.id, message.message_id, link, title)
+    title, channel_id = await _link_card_details(link)
+    card_id = ensure_link_card(
+        message.chat.id, message.message_id, link, title, youtube_channel_id=channel_id,
+    )
     row = [InlineKeyboardButton(text="Сделать /ai", callback_data=f"ai:link:{card_id}")]
     try:
         sent = await message.answer(
             f"Ссылка: {linked_title(title, link)}",
-            reply_markup=choice_keyboard(card_id, [row]),
+            reply_markup=choice_keyboard(card_id, [row] + _subscription_rows(card_id)),
         )
     except Exception as exc:
         logging.warning("Could not create link card for chat_id=%s: %s", message.chat.id, exc)

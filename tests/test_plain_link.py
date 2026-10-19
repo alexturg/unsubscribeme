@@ -1,15 +1,16 @@
 import asyncio
 import json
+import sqlite3
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from rssbot import bot
 from rssbot import ai_summarizer
 from rssbot import youtube_context
-from rssbot.db import CardEntry, CardMessage, User, init_engine, session_scope
+from rssbot.db import CardEntry, CardMessage, Feed, FeedRule, User, init_engine, session_scope
 
 
 def _setup(tmp_path, monkeypatch):
@@ -22,6 +23,10 @@ def _setup(tmp_path, monkeypatch):
     monkeypatch.setattr(bot, "_ensure_user_id", lambda _message: user_id)
     monkeypatch.setattr(bot, "_is_allowed", lambda _chat_id: True)
     monkeypatch.setattr(bot, "fetch_video_title", lambda *_args, **_kwargs: "Page <Title> & more")
+    monkeypatch.setattr(
+        bot, "fetch_video_metadata",
+        lambda *_args, **_kwargs: youtube_context.VideoMetadata("Page <Title> & more"),
+    )
     monkeypatch.setattr(
         bot,
         "fetch_webpage_content",
@@ -200,3 +205,166 @@ def test_youtube_oembed_title_reads_metadata_and_normalizes_spaces(monkeypatch):
 
     monkeypatch.setattr(youtube_context.urllib.request, "urlopen", urlopen)
     assert youtube_context.fetch_video_title("ia2QItAmyE8") == "Название видео & текст"
+
+
+CHANNEL_ID = "UC_x5XG1OV2P6uZZ5FSM9Ttw"
+
+
+def _with_channel(monkeypatch):
+    monkeypatch.setattr(
+        bot, "fetch_video_metadata",
+        lambda *_a, **_k: youtube_context.VideoMetadata(
+            "Video", f"https://www.youtube.com/channel/{CHANNEL_ID}"
+        ),
+    )
+
+
+@pytest.mark.parametrize("subscribed,enabled", [(False, False), (True, True), (True, False)])
+def test_video_card_subscription_button_depends_on_channel(tmp_path, monkeypatch, subscribed, enabled):
+    user_id = _setup(tmp_path, monkeypatch)
+    _with_channel(monkeypatch)
+    if subscribed:
+        with session_scope() as session:
+            session.add(Feed(
+                user_id=user_id, enabled=enabled,
+                url=f"https://youtube.com/feeds/videos.xml?x=1&channel_id={CHANNEL_ID}",
+            ))
+    message = _message("https://youtu.be/dQw4w9WgXcQ")
+    asyncio.run(bot.cmd_plain_link(message))
+    markup = message.answer.await_args.kwargs["reply_markup"]
+    buttons = [button for row in markup.inline_keyboard for button in row]
+    assert any(b.text == "Подписаться" for b in buttons) is (not subscribed or not enabled)
+    assert any(b.text == "Сделать /ai" for b in buttons)
+    with session_scope() as session:
+        assert session.query(CardEntry).one().youtube_channel_id == CHANNEL_ID
+
+
+def _subscription_callback(message, card_id):
+    return SimpleNamespace(
+        message=message, data=f"subscribe:card:{card_id}", answer=AsyncMock(),
+    )
+
+
+def test_subscribe_button_creates_and_schedules_channel_once(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    _with_channel(monkeypatch)
+    scheduler = SimpleNamespace(schedule_feed_poll=Mock())
+    monkeypatch.setattr(bot, "DEPS", SimpleNamespace(
+        settings=SimpleNamespace(DEFAULT_POLL_INTERVAL_MIN=10), scheduler=scheduler,
+    ))
+    monkeypatch.setattr(bot, "fetch_and_store_latest_item", AsyncMock(return_value=None))
+    message = _message("https://youtu.be/dQw4w9WgXcQ")
+    asyncio.run(bot.cmd_plain_link(message))
+    message.reply_markup = message.answer.await_args.kwargs["reply_markup"]
+    message.edit_reply_markup = AsyncMock()
+    with session_scope() as session:
+        card_id = session.query(CardEntry.id).scalar()
+    callback = _subscription_callback(message, card_id)
+    asyncio.run(bot.cb_subscribe_card(callback))
+    asyncio.run(bot.cb_subscribe_card(callback))
+    with session_scope() as session:
+        feed = session.query(Feed).one()
+        assert feed.url == f"https://www.youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}"
+        assert feed.enabled
+        assert feed.mode == "immediate"
+    scheduler.schedule_feed_poll.assert_called_once()
+    remaining = message.edit_reply_markup.await_args.kwargs["reply_markup"].inline_keyboard
+    assert all(b.text != "Подписаться" for row in remaining for b in row)
+    assert remaining[0][0].text == "Сделать /ai"
+
+
+def test_subscribe_reenables_muted_feed_without_changing_settings(tmp_path, monkeypatch):
+    user_id = _setup(tmp_path, monkeypatch)
+    card_id = bot.ensure_link_card(
+        77, 100, "https://youtu.be/dQw4w9WgXcQ", "Video", CHANNEL_ID,
+    )
+    with session_scope() as session:
+        feed = Feed(
+            user_id=user_id, url=f"https://youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}",
+            enabled=False, mode="digest", digest_time_local="18:00", digest_weekday=2,
+            poll_interval_min=30,
+        )
+        session.add(feed)
+        session.flush()
+        session.add(FeedRule(feed_id=feed.id, exclude_shorts=True))
+    scheduler = SimpleNamespace(schedule_feed_poll=Mock())
+    monkeypatch.setattr(bot, "DEPS", SimpleNamespace(scheduler=scheduler))
+    message = _message("")
+    message.reply_markup = None
+    message.edit_reply_markup = AsyncMock()
+    asyncio.run(bot.cb_subscribe_card(_subscription_callback(message, card_id)))
+    with session_scope() as session:
+        feed = session.query(Feed).one()
+        assert feed.enabled
+        assert (feed.mode, feed.digest_time_local, feed.digest_weekday) == ("digest", "18:00", 2)
+        assert feed.rules.exclude_shorts
+    scheduler.schedule_feed_poll.assert_called_once_with(feed.id, 30)
+
+
+def test_subscribe_callback_rejects_another_users_card(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    card_id = bot.ensure_link_card(77, 100, "https://youtu.be/dQw4w9WgXcQ", "Video", CHANNEL_ID)
+    message = _message("")
+    message.chat.id = 88
+    callback = _subscription_callback(message, card_id)
+    asyncio.run(bot.cb_subscribe_card(callback))
+    callback.answer.assert_awaited_once_with("Запись недоступна.", show_alert=True)
+    with session_scope() as session:
+        assert session.query(Feed).count() == 0
+
+
+def test_unknown_channel_still_creates_video_card(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    _with_channel(monkeypatch)
+    monkeypatch.setattr(bot, "get_channel_id", Mock(side_effect=RuntimeError("offline")))
+    message = _message("https://youtu.be/dQw4w9WgXcQ")
+    asyncio.run(bot.cmd_plain_link(message))
+    assert ">Video</a>" in message.answer.await_args.args[0]
+    message.delete.assert_awaited_once()
+    with session_scope() as session:
+        assert session.query(CardEntry).one().youtube_channel_id is None
+
+
+@pytest.mark.parametrize("author_url,expected", [
+    (f"https://www.youtube.com/channel/{CHANNEL_ID}", f"https://www.youtube.com/channel/{CHANNEL_ID}"),
+    ("https://www.youtube.com/@Example", "https://www.youtube.com/@Example"),
+    ("https://youtube.com.example.com/@Example", None),
+    ("https://example.com/@Example", None),
+    ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", None),
+    (None, None),
+])
+def test_video_metadata_uses_only_author_channel_urls(monkeypatch, author_url, expected):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return json.dumps({"title": " Video ", "author_url": author_url}).encode()
+
+    monkeypatch.setattr(youtube_context.urllib.request, "urlopen", lambda *_a, **_k: Response())
+    metadata = youtube_context.fetch_video_metadata("dQw4w9WgXcQ")
+    assert metadata.title == "Video"
+    assert metadata.channel_url == expected
+
+
+def test_existing_cards_gain_channel_column_without_losing_data(tmp_path):
+    path = tmp_path / "old.sqlite"
+    with sqlite3.connect(path) as connection:
+        connection.execute("""CREATE TABLE card_entries (
+            id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL,
+            source_key VARCHAR(128) NOT NULL, kind VARCHAR(32) NOT NULL,
+            title VARCHAR(500) NOT NULL, link VARCHAR(1000), body TEXT,
+            status VARCHAR(16), status_source VARCHAR(32), chosen_at DATETIME,
+            someday_at DATETIME, UNIQUE(user_id, source_key)
+        )""")
+        connection.execute("""INSERT INTO card_entries
+            (user_id, source_key, kind, title, status)
+            VALUES (1, 'link:100', 'link', 'Saved title', 'someday')""")
+    init_engine(path)
+    init_engine(path)
+    with session_scope() as session:
+        card = session.query(CardEntry).one()
+        assert (card.title, card.status, card.youtube_channel_id) == ("Saved title", "someday", None)

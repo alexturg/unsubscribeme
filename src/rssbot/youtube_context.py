@@ -5,7 +5,7 @@ import json
 import re
 import urllib.error
 import urllib.request
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 
 DEFAULT_USER_AGENT = (
@@ -35,7 +35,13 @@ class VideoContextError(RuntimeError):
     """Raised when fallback YouTube context could not be extracted."""
 
 
-def fetch_video_title(video_id: str, *, timeout_sec: int = 3) -> str:
+@dataclass(frozen=True)
+class VideoMetadata:
+    title: str
+    channel_url: str | None = None
+
+
+def fetch_video_metadata(video_id: str, *, timeout_sec: int = 3) -> VideoMetadata:
     """Read lightweight video metadata without fetching captions or the watch page."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
         raise VideoContextError("Invalid YouTube video ID")
@@ -48,7 +54,24 @@ def fetch_video_title(video_id: str, *, timeout_sec: int = 3) -> str:
     title = data.get("title") if isinstance(data, dict) else None
     if not isinstance(title, str) or not title.strip():
         raise VideoContextError("YouTube returned no video title")
-    return _normalize_space(title)[:500]
+    channel_url = data.get("author_url")
+    if isinstance(channel_url, str):
+        try:
+            parsed = urlparse(channel_url)
+            host = (parsed.hostname or "").lower()
+            if parsed.scheme != "https" or not (host == "youtube.com" or host.endswith(".youtube.com")):
+                channel_url = None
+            elif not re.fullmatch(r"/(?:channel/UC[A-Za-z0-9_-]{22}|@[^/]+|(?:c|user)/[^/]+)/?", parsed.path):
+                channel_url = None
+        except ValueError:
+            channel_url = None
+    else:
+        channel_url = None
+    return VideoMetadata(_normalize_space(title)[:500], channel_url)
+
+
+def fetch_video_title(video_id: str, *, timeout_sec: int = 3) -> str:
+    return fetch_video_metadata(video_id, timeout_sec=timeout_sec).title
 
 
 @dataclass(frozen=True)

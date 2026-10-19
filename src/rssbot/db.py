@@ -143,6 +143,7 @@ class CardEntry(Base):
     status_source: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     chosen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     someday_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    youtube_channel_id: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
 
 
 class CardMessage(Base):
@@ -206,6 +207,10 @@ def init_engine(db_path: Path) -> Engine:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(f"sqlite:///{db_path}", future=True, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("card_entries")}
+        if "youtube_channel_id" not in columns:
+            connection.exec_driver_sql("ALTER TABLE card_entries ADD COLUMN youtube_channel_id VARCHAR(24)")
     with engine.begin() as connection:
         columns = {column["name"] for column in inspect(connection).get_columns("feed_rules")}
         if "exclude_shorts" not in columns:

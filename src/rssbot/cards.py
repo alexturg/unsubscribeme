@@ -84,7 +84,10 @@ def create_ai_card(chat_id: int, title: str, link: str, body: str) -> int:
         return card.id
 
 
-def ensure_link_card(chat_id: int, message_id: int, link: str, title: str) -> int:
+def ensure_link_card(
+    chat_id: int, message_id: int, link: str, title: str,
+    youtube_channel_id: str | None = None,
+) -> int:
     """Create one card per submitted message, preserving its link for Someday."""
     with session_scope() as session:
         user = session.query(User).filter(User.chat_id == chat_id).first()
@@ -103,9 +106,12 @@ def ensure_link_card(chat_id: int, message_id: int, link: str, title: str) -> in
                 kind="link",
                 title=(title.strip() or link)[:500],
                 link=link,
+                youtube_channel_id=youtube_channel_id,
             )
             session.add(card)
             session.flush()
+        elif youtube_channel_id:
+            card.youtube_channel_id = youtube_channel_id
         return card.id
 
 

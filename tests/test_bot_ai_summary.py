@@ -299,11 +299,14 @@ def test_ai_card_error_keeps_card_and_retry_button(monkeypatch):
         assert session.get(CardEntry, card_id).body is None
 
 
-def test_long_summary_pages_edit_same_card_and_check_owner(monkeypatch):
+@pytest.mark.parametrize("channel_id", [None, "UC_x5XG1OV2P6uZZ5FSM9Ttw"])
+def test_long_summary_pages_edit_same_card_and_check_owner(monkeypatch, channel_id):
     monkeypatch.setattr(bot_module, "DEPS", SimpleNamespace(settings=SimpleNamespace()))
     monkeypatch.setattr(bot_module, "_is_allowed", lambda _: True)
     url = "https://example.com/post"
     card_id = bot_module.ensure_link_card(123, 100, url, "Post")
+    with session_scope() as session:
+        session.get(CardEntry, card_id).youtube_channel_id = channel_id
     message = DummyMessage("Original card")
     sent, send_text = _make_send_text()
 
@@ -321,6 +324,10 @@ def test_long_summary_pages_edit_same_card_and_check_owner(monkeypatch):
     callback.data = next_button.callback_data
     asyncio.run(bot_module.cb_ai_page(callback))
     assert len(message.edits) == 3
+    assert any(
+        button.text == "Подписаться"
+        for row in message.reply_markup.inline_keyboard for button in row
+    ) is bool(channel_id)
     for text, _kwargs in message.edits:
         assert len(text.encode("utf-16-le")) // 2 < 4096
     with session_scope() as session:
