@@ -658,14 +658,13 @@ async def _run_ai_summary(
     card_message: Optional[Message] = None,
     existing_card_id: Optional[int] = None,
     retry_callback: Optional[str] = None,
-) -> None:
+) -> bool:
     if card_message is not None:
-        await _run_ai_summary_in_card(
+        return await _run_ai_summary_in_card(
             card_message, video_url, custom_prompt,
             card_id=existing_card_id, force_whisper=force_whisper,
             retry_callback=retry_callback,
         )
-        return
     async def _safe_send(
         text: str,
         reply_markup: Optional[InlineKeyboardMarkup] = None,
@@ -718,7 +717,7 @@ async def _run_ai_summary(
     )
     progress_message = await _safe_send(start_text)
     if progress_message is None:
-        return
+        return False
 
     try:
         result = await summarize_video(
@@ -735,7 +734,7 @@ async def _run_ai_summary(
             f"Источник: {video_url}\n"
             f"Ошибка: {str(exc)}"
         )
-        return
+        return False
     except Exception as exc:
         await _cleanup_progress_message()
         logging.error("Unexpected /ai failure for chat_id=%s: %s", chat_id, exc, exc_info=True)
@@ -744,7 +743,7 @@ async def _run_ai_summary(
             f"Источник: {video_url}\n"
             "Ошибка: внутренняя ошибка."
         )
-        return
+        return False
 
     await _cleanup_progress_message()
 
@@ -777,19 +776,20 @@ async def _run_ai_summary(
         )
         sent = await _safe_send(response_text, reply_markup=whisper_kb)
         if sent is None:
-            return
+            return False
         register_card_message(card_id, chat_id, getattr(sent, "message_id", None))
         await _cleanup_source_request_message()
-        return
+        return True
 
     seen_kb = choice_keyboard(card_id)
     for chunk in split_message_chunks(response_text):
         sent = await _safe_send(chunk, reply_markup=seen_kb)
         if sent is None:
-            return
+            return False
         register_card_message(card_id, chat_id, getattr(sent, "message_id", None))
 
     await _cleanup_source_request_message()
+    return True
 
 
 _AI_CARD_JOBS: set[tuple[int, int]] = set()
@@ -817,10 +817,10 @@ def _ai_card_page(title, link, body, card_id, page=0, extra_rows=None):
 async def _run_ai_summary_in_card(
     message: Message, video_url: str, custom_prompt: Optional[str], *,
     card_id: Optional[int], force_whisper: bool, retry_callback: Optional[str],
-) -> None:
+) -> bool:
     job_key = (message.chat.id, message.message_id)
     if job_key in _AI_CARD_JOBS:
-        return
+        return False
     _AI_CARD_JOBS.add(job_key)
     try:
         if card_id is None:
@@ -830,7 +830,7 @@ async def _run_ai_summary_in_card(
             user = session.query(User).filter(User.chat_id == message.chat.id).first()
             card = session.get(CardEntry, card_id)
             if user is None or card is None or card.user_id != user.id:
-                return
+                return False
             title, link = card.title, card.link
         start = "Запускаю Whisper-транскрипцию и суммаризацию…" if force_whisper else "Запускаю суммаризацию…"
         await message.edit_text(
@@ -852,7 +852,7 @@ async def _run_ai_summary_in_card(
                 card_id, extra_rows=rows,
             )
             await message.edit_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
-            return
+            return False
         if result.summary_basis == "metadata_comments":
             status = "Не удалось получить субтитры. Предварительная сводка по описанию и комментариям."
         elif result.summary_basis == "whisper":
@@ -871,8 +871,10 @@ async def _run_ai_summary_in_card(
             )])
         text, markup = _ai_card_page(title, link, body, card_id, extra_rows=rows)
         await message.edit_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
+        return True
     except Exception:
         logging.exception("Could not update AI card for chat_id=%s", message.chat.id)
+        return False
     finally:
         _AI_CARD_JOBS.discard(job_key)
 
@@ -1395,6 +1397,18 @@ async def _show_someday_page(message: Message, user_id: int, view_id: int, page:
     if result is None:
         return False
     cards, has_more = result
+    while edit and not cards and page > 1:
+        page -= 1
+        result = get_someday_page(user_id, view_id, page)
+        if result is None:
+            return False
+        cards, has_more = result
+    if edit and not cards:
+        try:
+            await message.delete()
+            return True
+        except Exception as exc:
+            logging.debug("Could not delete empty /someday list message: %s", exc)
     text = _someday_text(page, cards)
     markup = _someday_markup(view_id, page, cards, has_more)
     if edit:
@@ -1465,7 +1479,9 @@ async def cb_someday(callback: CallbackQuery) -> None:
                     reply_markup=reply_markup,
                 )
 
-            await _run_ai_summary(message.chat.id, link, None, _send_text)
+            if await _run_ai_summary(message.chat.id, link, None, _send_text):
+                choose_card(message.chat.id, card_id, "done")
+                await _show_someday_page(message, user_id, view_id, page, edit=True)
             return
         view_id = int(parts[2])
         page = int(parts[3])

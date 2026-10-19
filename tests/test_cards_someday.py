@@ -3,6 +3,8 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -16,6 +18,7 @@ from rssbot.cards import (
     start_someday_view,
 )
 from rssbot import bot as bot_module
+from rssbot.ai_summarizer import AiSummarizerError, AiSummaryResult
 from rssbot.db import (
     Base,
     CardEntry,
@@ -261,13 +264,24 @@ def test_card_choice_saves_before_deleting_all_ai_messages(tmp_path, monkeypatch
     bot.delete_message.assert_awaited_once_with(chat_id=77, message_id=11)
 
 
-def test_someday_ai_button_summarizes_link_and_keeps_item(tmp_path, monkeypatch):
+@pytest.mark.parametrize("success,remaining,delete_fails", [
+    (True, 0, False), (True, 1, False), (False, 0, False), (True, 0, True),
+])
+def test_someday_ai_button_updates_list_after_success(
+    tmp_path, monkeypatch, success, remaining, delete_fails,
+):
     init_engine(tmp_path / "bot.sqlite")
     with session_scope() as session:
         user = User(chat_id=77)
         session.add(user)
         session.flush()
         user_id = user.id
+        for number in range(remaining):
+            session.add(CardEntry(
+                user_id=user_id, source_key=f"other:{number}", kind="link",
+                title="Another article", link="https://example.com/other", status="someday",
+                someday_at=datetime.now(timezone.utc) - timedelta(days=1),
+            ))
         card = CardEntry(
             user_id=user_id,
             source_key="link:one",
@@ -282,7 +296,14 @@ def test_someday_ai_button_summarizes_link_and_keeps_item(tmp_path, monkeypatch)
         card_id = card.id
     monkeypatch.setattr(bot_module, "_ensure_user_id", lambda _message: user_id)
     monkeypatch.setattr(bot_module, "_is_allowed", lambda _chat_id: True)
-    run_ai = AsyncMock()
+    monkeypatch.setattr(bot_module, "DEPS", SimpleNamespace(settings=SimpleNamespace()))
+    summarize = AsyncMock(return_value=AiSummaryResult(
+        "- Summary ready", None, None, source_type="web_page", summary_basis="web_page",
+    ))
+    if not success:
+        summarize.side_effect = AiSummarizerError("Source unavailable")
+    monkeypatch.setattr(bot_module, "summarize_video", summarize)
+    run_ai = AsyncMock(wraps=bot_module._run_ai_summary)
     monkeypatch.setattr(bot_module, "_run_ai_summary", run_ai)
     message = SimpleNamespace(
         chat=SimpleNamespace(id=77),
@@ -292,20 +313,39 @@ def test_someday_ai_button_summarizes_link_and_keeps_item(tmp_path, monkeypatch)
     )
     asyncio.run(bot_module.cmd_someday(message))
     message.delete.assert_awaited_once()
+    message.delete.reset_mock()
+    if delete_fails:
+        message.delete.side_effect = RuntimeError("Cannot delete message")
     markup = message.answer.await_args.kwargs["reply_markup"]
     buttons = markup.inline_keyboard[0]
     assert [button.text for button in buttons] == ["✓ 1", "Skip 1", "AI 1"]
     callback = SimpleNamespace(
         message=message,
         data=buttons[2].callback_data,
-        bot=SimpleNamespace(send_message=AsyncMock()),
+        bot=SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(
+            message_id=100, delete=AsyncMock(),
+        ))),
         answer=AsyncMock(),
     )
     asyncio.run(bot_module.cb_someday(callback))
     assert run_ai.await_args.args[:3] == (77, "https://example.com/article", None)
-    message.edit_text.assert_not_awaited()
+    if success:
+        if remaining or delete_fails:
+            message.edit_text.assert_awaited_once()
+            text = message.edit_text.await_args.args[0]
+            assert "Saved article" not in text
+            assert ("Another article" if remaining else "Список пуст") in text
+        else:
+            message.edit_text.assert_not_awaited()
+        if not remaining:
+            message.delete.assert_awaited_once()
+        else:
+            message.delete.assert_not_awaited()
+    else:
+        message.edit_text.assert_not_awaited()
+        message.delete.assert_not_awaited()
     with session_scope() as session:
-        assert session.get(CardEntry, card_id).status == "someday"
+        assert session.get(CardEntry, card_id).status == ("done" if success else "someday")
 
     choose_card(77, card_id, "done")
     asyncio.run(bot_module.cb_someday(callback))
@@ -313,3 +353,29 @@ def test_someday_ai_button_summarizes_link_and_keeps_item(tmp_path, monkeypatch)
     callback.answer.assert_awaited_with(
         "Запись недоступна. Откройте /someday снова.", show_alert=True
     )
+
+
+def test_empty_someday_page_returns_to_previous_page_without_deleting_list(tmp_path):
+    init_engine(tmp_path / "bot.sqlite")
+    with session_scope() as session:
+        user = User(chat_id=77)
+        session.add(user)
+        session.flush()
+        user_id = user.id
+        for number in range(11):
+            session.add(CardEntry(
+                user_id=user_id, source_key=f"saved:{number}", kind="link",
+                title=f"Article {number}", link=f"https://example.com/{number}",
+                status="someday", someday_at=datetime.now(timezone.utc),
+            ))
+    view_id = start_someday_view(user_id)
+    first_page, _ = get_someday_page(user_id, view_id, 1)
+    assert advance_someday_view(user_id, view_id, 1, first_page[-1].id)
+    second_page, _ = get_someday_page(user_id, view_id, 2)
+    assert len(second_page) == 1
+    choose_card(77, second_page[0].id, "done")
+    message = SimpleNamespace(edit_text=AsyncMock(), delete=AsyncMock())
+    assert asyncio.run(bot_module._show_someday_page(message, user_id, view_id, 2, edit=True))
+    message.delete.assert_not_awaited()
+    message.edit_text.assert_awaited_once()
+    assert "страница 1" in message.edit_text.await_args.args[0]
