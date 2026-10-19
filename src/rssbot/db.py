@@ -18,6 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     func,
+    inspect,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
@@ -53,6 +54,7 @@ class Feed(Base):
         Enum("immediate", "digest", "on_demand", name="feed_mode"), nullable=False, default="immediate"
     )
     digest_time_local: Mapped[Optional[str]] = mapped_column(String(5), nullable=True)
+    digest_weekday: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     poll_interval_min: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
@@ -203,6 +205,10 @@ def init_engine(db_path: Path) -> Engine:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(f"sqlite:///{db_path}", future=True, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("feeds")}
+        if "digest_weekday" not in columns:
+            connection.exec_driver_sql("ALTER TABLE feeds ADD COLUMN digest_weekday INTEGER")
     _migrate_legacy_deliveries(engine)
     _engine = engine
     _SessionLocal = sessionmaker(

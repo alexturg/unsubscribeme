@@ -41,6 +41,7 @@ from .cards import (
     start_someday_view,
 )
 from .scheduler import BotScheduler, is_digest_source
+from .digest_schedule import digest_day_label, parse_digest_day
 from .rss import fetch_and_store_event_source, fetch_and_store_latest_item
 from .web_summarize import _is_reddit_host, fetch_webpage_content
 from .youtube_context import fetch_video_title
@@ -175,6 +176,7 @@ async def _create_feed_and_seed_reply(
                     existing.digest_time_local = DEPS.settings.DIGEST_DEFAULT_TIME
             else:
                 existing.digest_time_local = None
+                existing.digest_weekday = None
             s.flush()
             feed_id = existing.id
             already_exists = True
@@ -473,6 +475,8 @@ def _format_feed_list_line(feed: Feed) -> str:
         if feed.digest_time_local
         else ""
     )
+    if feed.mode == "digest" and feed.digest_weekday is not None:
+        time_part += f", {digest_day_label(feed.digest_weekday)}"
     return f"{status} {feed.id}: {title} — {safe_mode}{time_part} [{safe_type}]"
 
 
@@ -2161,7 +2165,7 @@ async def cmd_setmode(message: Message) -> None:
         return
     parts = (message.text or "").split()
     if len(parts) < 3:
-        await message.answer("Использование: /setmode <feed_id> <mode> [HH:MM]")
+        await message.answer("Использование: /setmode <feed_id> <mode> [HH:MM] [day=пт|daily]")
         return
     try:
         feed_id = int(parts[1])
@@ -2194,9 +2198,21 @@ async def cmd_setmode(message: Message) -> None:
 
     digest_time_raw = None
     digest_time_provided = False
+    digest_day_provided = False
+    digest_weekday = None
     extra_parts: list[str] = []
     for p in parts[3:]:
-        if p.startswith("time="):
+        if p.startswith("day="):
+            if digest_day_provided:
+                extra_parts.append(p)
+                continue
+            digest_day_provided = True
+            try:
+                digest_weekday = parse_digest_day(p.split("=", 1)[1])
+            except ValueError as exc:
+                await message.answer(str(exc))
+                return
+        elif p.startswith("time="):
             digest_time_provided = True
             digest_time_raw = p.split("=", 1)[1].strip()
         else:
@@ -2212,7 +2228,7 @@ async def cmd_setmode(message: Message) -> None:
 
     if extra_parts:
         await message.answer(
-            "Неверные параметры: " + " ".join(extra_parts) + ". Формат: /setmode <feed_id> <mode> [HH:MM]"
+            "Неверные параметры: " + " ".join(extra_parts) + ". Формат: /setmode <feed_id> <mode> [HH:MM] [day=пт|daily]"
         )
         return
 
@@ -2225,6 +2241,9 @@ async def cmd_setmode(message: Message) -> None:
         if mode != "digest":
             await message.answer("Время можно задавать только для режима digest.")
             return
+    if digest_day_provided and mode != "digest":
+        await message.answer("День можно задавать только для режима digest.")
+        return
     with session_scope() as s:
         feed = s.get(Feed, feed_id)
         if not feed or feed.user_id != user_id:
@@ -2232,19 +2251,23 @@ async def cmd_setmode(message: Message) -> None:
             return
         feed.mode = mode
         if mode == "digest":
+            if digest_day_provided:
+                feed.digest_weekday = digest_weekday
             if digest_time_provided:
                 feed.digest_time_local = digest_time
             elif not feed.digest_time_local:
                 feed.digest_time_local = DEPS.settings.DIGEST_DEFAULT_TIME
         else:
             feed.digest_time_local = None
+            feed.digest_weekday = None
         interval = feed.poll_interval_min
         new_mode = feed.mode
         new_time = feed.digest_time_local
+        new_day = digest_day_label(feed.digest_weekday)
     # Reschedule polling job (unchanged interval)
     DEPS.scheduler.schedule_feed_poll(feed_id, interval)
     if new_mode == "digest":
-        await message.answer(f"Режим обновлён для ленты {feed_id}: digest, время {new_time}.")
+        await message.answer(f"Режим обновлён для ленты {feed_id}: digest, {new_day}, время {new_time}.")
     else:
         await message.answer(f"Режим обновлён для ленты {feed_id}: {new_mode}.")
 

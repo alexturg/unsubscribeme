@@ -395,7 +395,7 @@ class BotScheduler:
         return sent
 
     async def _digest_scan_tick(self) -> None:
-        # For each feed in digest mode, if it's time in user's tz and not sent today, send digest
+        # Send at the configured local time and optional weekday, once per day.
         with session_scope() as s:
             rows = (
                 s.query(Feed, User)
@@ -416,6 +416,8 @@ class BotScheduler:
                 continue
             tz = ZoneInfo(user.tz or "UTC")
             now_local = now_utc.astimezone(tz)
+            if feed.digest_weekday is not None and now_local.weekday() != feed.digest_weekday:
+                continue
             want = time(hour=hh, minute=mm)
             if now_local.hour != want.hour or now_local.minute != want.minute:
                 continue

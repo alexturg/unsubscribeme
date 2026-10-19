@@ -12,6 +12,7 @@ from .db import Feed, Session, User, Item, Delivery, FeedBaseline, FeedRule, ses
 from .rules import Content, matches_rules
 from .rss import compute_available_at
 from .scheduler import BotScheduler
+from .digest_schedule import WEEKDAY_NAMES, parse_digest_day
 
 
 @dataclass
@@ -196,6 +197,12 @@ async def user_page(request: web.Request) -> web.Response:
         feed_cls = "feed disabled" if not f.enabled else "feed"
         status_badge = '<span class="badge gray">Отключено</span>' if not f.enabled else ""
 
+        selected = ' selected' if f.digest_weekday is None else ''
+        day_options = f'<option value="daily"{selected}>Ежедневно</option>'
+        for day, name in enumerate(WEEKDAY_NAMES):
+            selected = ' selected' if f.digest_weekday == day else ''
+            day_options += f'<option value="{name}"{selected}>{name}</option>'
+
         items_html.append(
             f"""
             <div class="{feed_cls}">
@@ -208,6 +215,7 @@ async def user_page(request: web.Request) -> web.Response:
                   </div>
                   <div><label>Интервал (мин)</label><input type="number" name="interval" value="{f.poll_interval_min}" min="1"></div>
                   <div><label>Дайджест время</label><input type="text" name="time" value="{f.digest_time_local or ''}" placeholder="HH:MM"></div>
+                  <div><label>День дайджеста</label><select name="day">{day_options}</select></div>
                   <div><label>Включено</label><select name="enabled">{_bool_options(f.enabled)}</select></div>
                 </div>
                 <div class="row" style="margin-top:.5rem">
@@ -315,6 +323,7 @@ async def add_feed(request: web.Request) -> web.Response:
                     existing.digest_time_local = DEPS.settings.DIGEST_DEFAULT_TIME
             else:
                 existing.digest_time_local = None
+                existing.digest_weekday = None
             s.flush()
             feed_id = existing.id
         else:
@@ -353,6 +362,11 @@ async def update_feed(request: web.Request) -> web.Response:
     label = (form.get("label") or None) or None
     enabled_str = (form.get("enabled") or "true").lower()
     digest_time = (form.get("time") or "").strip() or None
+    day_provided = "day" in form
+    try:
+        digest_weekday = parse_digest_day(form.get("day") or "daily")
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc))
     interval = form.get("interval") or "10"
     try:
         interval_i = max(1, int(interval))
@@ -372,12 +386,15 @@ async def update_feed(request: web.Request) -> web.Response:
         feed.poll_interval_min = interval_i
         feed.enabled = enabled_str == "true"
         if mode == "digest":
+            if day_provided:
+                feed.digest_weekday = digest_weekday
             if digest_time:
                 feed.digest_time_local = digest_time
             elif not feed.digest_time_local:
                 feed.digest_time_local = DEPS.settings.DIGEST_DEFAULT_TIME
         else:
             feed.digest_time_local = None
+            feed.digest_weekday = None
         enabled = feed.enabled
     if enabled:
         DEPS.scheduler.schedule_feed_poll(feed_id, interval_i)
