@@ -3,24 +3,29 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from rssbot import bot
 from rssbot import scheduler as scheduler_mod
 from rssbot.db import Delivery, Feed, Item, User, init_engine, session_scope
 from rssbot.scheduler import BotScheduler
 
 
-def test_digest_usage_escapes_html(monkeypatch):
-    message = SimpleNamespace(text="/digest", answer=AsyncMock())
+def test_digest_without_feeds_deletes_command(monkeypatch, tmp_path):
+    init_engine(tmp_path / "bot.sqlite")
+    message = SimpleNamespace(text="/digest", answer=AsyncMock(), delete=AsyncMock())
     monkeypatch.setattr(bot, "_ensure_user_id", lambda _message: 1)
 
     asyncio.run(bot.cmd_digest(message))
 
     message.answer.assert_awaited_once_with(
-        "Использование: /digest &lt;feed_id|all&gt;"
+        "Нет активных лент в режиме digest или on_demand."
     )
+    message.delete.assert_awaited_once()
 
 
-def test_digest_all_only_uses_subscription_sources(monkeypatch, tmp_path):
+@pytest.mark.parametrize("command", ["/digest", "/digest all", "/digest@mybot  "])
+def test_digest_all_only_uses_subscription_sources(monkeypatch, tmp_path, command):
     init_engine(tmp_path / "bot.sqlite")
     with session_scope() as s:
         user = User(chat_id=123, tz="UTC")
@@ -45,19 +50,51 @@ def test_digest_all_only_uses_subscription_sources(monkeypatch, tmp_path):
     send = AsyncMock(return_value=0)
     monkeypatch.setattr(bot, "_ensure_user_id", lambda _message: user_id)
     monkeypatch.setattr(bot, "DEPS", SimpleNamespace(scheduler=SimpleNamespace(_send_digest_for_feed=send)))
-    message = SimpleNamespace(text="/digest all", answer=AsyncMock())
+    message = SimpleNamespace(text=command, answer=AsyncMock(), delete=AsyncMock())
 
     asyncio.run(bot.cmd_digest(message))
 
     assert send.await_count == 2
     assert all(call.kwargs == {"update_last_digest_at": False} for call in send.await_args_list)
     message.answer.assert_awaited_once_with("Отправлено записей: 0 (проверено лент: 2).")
+    message.delete.assert_awaited_once()
 
     message.text = f"/digest {event_feed_id}"
     message.answer.reset_mock()
     asyncio.run(bot.cmd_digest(message))
     message.answer.assert_awaited_once_with("Для источников событий дайджест недоступен.")
     assert send.await_count == 2
+    message.delete.assert_awaited_once()
+
+
+def test_digest_deletion_failure_does_not_fail_command(monkeypatch, tmp_path):
+    init_engine(tmp_path / "bot.sqlite")
+    monkeypatch.setattr(bot, "_ensure_user_id", lambda _message: 1)
+    message = SimpleNamespace(
+        text="/digest", answer=AsyncMock(),
+        delete=AsyncMock(side_effect=RuntimeError("Cannot delete message")),
+    )
+    asyncio.run(bot.cmd_digest(message))
+    message.answer.assert_awaited_once_with("Нет активных лент в режиме digest или on_demand.")
+    message.delete.assert_awaited_once()
+
+
+def test_digest_send_failure_keeps_command(monkeypatch, tmp_path):
+    init_engine(tmp_path / "bot.sqlite")
+    with session_scope() as s:
+        user = User(chat_id=123, tz="UTC")
+        s.add(user)
+        s.flush()
+        user_id = user.id
+        feed = Feed(user_id=user_id, url="source:youtube", type="youtube", mode="digest")
+        s.add(feed)
+    send = AsyncMock(side_effect=RuntimeError("Telegram unavailable"))
+    monkeypatch.setattr(bot, "_ensure_user_id", lambda _message: user_id)
+    monkeypatch.setattr(bot, "DEPS", SimpleNamespace(scheduler=SimpleNamespace(_send_digest_for_feed=send)))
+    message = SimpleNamespace(text="/digest", answer=AsyncMock(), delete=AsyncMock())
+    with pytest.raises(RuntimeError, match="Telegram unavailable"):
+        asyncio.run(bot.cmd_digest(message))
+    message.delete.assert_not_awaited()
 
 
 def test_digest_only_sends_items_published_after_subscription(monkeypatch, tmp_path):

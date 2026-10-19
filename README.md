@@ -206,7 +206,8 @@ AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_REQUEST_TIMEOUT_SEC=6
 - `on_demand`  
   Элементы сохраняются, но не отправляются автоматически. Используйте `/digest <feed_id|all>`.
 
-`/digest all` проверяет включённые ленты в режимах `digest` и `on_demand`.
+`/digest` без аргументов и `/digest all` проверяют включённые ленты в режимах `digest` и `on_demand`.
+После успешной обработки сообщение пользователя с командой удаляется.
 Источники событий JSON, ICS и ручные списки не участвуют в дайджесте.
 
 ## Команды Telegram
@@ -230,7 +231,7 @@ AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_REQUEST_TIMEOUT_SEC=6
 | `/remove` | `/remove <feed_id>` | Полное удаление ленты |
 | `/setmode` | `/setmode <feed_id> <mode> [HH:MM]` | Смена режима ленты |
 | `/setfilter` | `/setfilter <feed_id> <json>` | Установка фильтров |
-| `/digest` | `/digest <feed_id\|all>` | Ручной запуск дайджеста |
+| `/digest` | `/digest [feed_id\|all]` | Ручной запуск дайджеста (по умолчанию — все ленты) |
 | `/mute` | `/mute <feed_id>` | Временно отключить ленту |
 | `/unmute` | `/unmute <feed_id>` | Включить ленту обратно |
 

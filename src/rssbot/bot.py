@@ -2264,17 +2264,14 @@ async def cmd_setfilter(message: Message) -> None:
 async def cmd_digest(message: Message) -> None:
     """Запустить дайджест вручную.
 
-    Формат: /digest [feed_id|all]
+    Формат: /digest [feed_id|all]. Без аргумента проверяет все ленты.
     """
     user_id = _ensure_user_id(message)
     if not user_id:
         await message.answer("Доступ запрещен.")
         return
     parts = (message.text or "").split()
-    if len(parts) < 2:
-        await message.answer("Использование: /digest &lt;feed_id|all&gt;")
-        return
-    arg = parts[1].lower()
+    arg = parts[1].lower() if len(parts) > 1 else "all"
     with session_scope() as s:
         if arg == "all":
             feeds = s.query(Feed).filter(Feed.user_id == user_id, Feed.enabled == True).all()
@@ -2301,11 +2298,15 @@ async def cmd_digest(message: Message) -> None:
             feed_ids = [feed_id]
     if not feed_ids:
         await message.answer("Нет активных лент в режиме digest или on_demand.")
-        return
-    sent = 0
-    for fid in feed_ids:
-        sent += await DEPS.scheduler._send_digest_for_feed(fid, update_last_digest_at=False)
-    await message.answer(f"Отправлено записей: {sent} (проверено лент: {len(feed_ids)}).")
+    else:
+        sent = 0
+        for fid in feed_ids:
+            sent += await DEPS.scheduler._send_digest_for_feed(fid, update_last_digest_at=False)
+        await message.answer(f"Отправлено записей: {sent} (проверено лент: {len(feed_ids)}).")
+    try:
+        await message.delete()
+    except Exception as exc:
+        logging.debug("Could not delete /digest command message: %s", exc)
 
 
 @router.message(Command("mute"))
