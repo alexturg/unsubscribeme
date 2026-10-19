@@ -317,6 +317,7 @@ def test_someday_ai_button_updates_list_after_success(
     if delete_fails:
         message.delete.side_effect = RuntimeError("Cannot delete message")
     markup = message.answer.await_args.kwargs["reply_markup"]
+    assert message.answer.await_args.args[0].startswith("<b>Someday</b>\n")
     buttons = markup.inline_keyboard[0]
     assert [button.text for button in buttons] == ["✓ 1", "Skip 1", "AI 1"]
     callback = SimpleNamespace(
@@ -378,4 +379,4 @@ def test_empty_someday_page_returns_to_previous_page_without_deleting_list(tmp_p
     assert asyncio.run(bot_module._show_someday_page(message, user_id, view_id, 2, edit=True))
     message.delete.assert_not_awaited()
     message.edit_text.assert_awaited_once()
-    assert "страница 1" in message.edit_text.await_args.args[0]
+    assert message.edit_text.await_args.args[0].startswith("<b>Someday</b>\n")

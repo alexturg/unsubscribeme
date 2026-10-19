@@ -1376,10 +1376,11 @@ def _someday_markup(view_id: int, page: int, cards: list[CardEntry], has_more: b
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _someday_text(page: int, cards: list[CardEntry]) -> str:
+def _someday_text(page: int, cards: list[CardEntry], has_more: bool) -> str:
+    heading = f"<b>Someday · страница {page}</b>" if page > 1 or has_more else "<b>Someday</b>"
     if not cards:
-        return f"<b>Someday · страница {page}</b>\nСписок пуст."
-    lines = [f"<b>Someday · страница {page}</b>"]
+        return f"{heading}\nСписок пуст."
+    lines = [heading]
     for number, card in enumerate(cards, start=1):
         title = html_escape(card.title[:160], quote=False)
         link = (card.link or "").strip()
@@ -1409,7 +1410,7 @@ async def _show_someday_page(message: Message, user_id: int, view_id: int, page:
             return True
         except Exception as exc:
             logging.debug("Could not delete empty /someday list message: %s", exc)
-    text = _someday_text(page, cards)
+    text = _someday_text(page, cards, has_more)
     markup = _someday_markup(view_id, page, cards, has_more)
     if edit:
         await message.edit_text(text, reply_markup=markup)
