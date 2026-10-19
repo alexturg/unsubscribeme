@@ -1775,7 +1775,7 @@ async def cb_subscribe_card(callback: CallbackQuery) -> None:
             await _create_feed_and_seed_reply(
                 message, user_id,
                 f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}",
-                "immediate", None, DEPS.settings.DEFAULT_POLL_INTERVAL_MIN, None,
+                "digest", None, DEPS.settings.DEFAULT_POLL_INTERVAL_MIN, None,
             )
     except Exception:
         logging.exception("Could not subscribe from card %s", card_id)

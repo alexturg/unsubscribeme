@@ -250,7 +250,8 @@ def test_subscribe_button_creates_and_schedules_channel_once(tmp_path, monkeypat
     _with_channel(monkeypatch)
     scheduler = SimpleNamespace(schedule_feed_poll=Mock())
     monkeypatch.setattr(bot, "DEPS", SimpleNamespace(
-        settings=SimpleNamespace(DEFAULT_POLL_INTERVAL_MIN=10), scheduler=scheduler,
+        settings=SimpleNamespace(DEFAULT_POLL_INTERVAL_MIN=10, DIGEST_DEFAULT_TIME="21:30"),
+        scheduler=scheduler,
     ))
     monkeypatch.setattr(bot, "fetch_and_store_latest_item", AsyncMock(return_value=None))
     message = _message("https://youtu.be/dQw4w9WgXcQ")
@@ -266,7 +267,8 @@ def test_subscribe_button_creates_and_schedules_channel_once(tmp_path, monkeypat
         feed = session.query(Feed).one()
         assert feed.url == f"https://www.youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}"
         assert feed.enabled
-        assert feed.mode == "immediate"
+        assert feed.mode == "digest"
+        assert feed.digest_time_local == "21:30"
     scheduler.schedule_feed_poll.assert_called_once()
     remaining = message.edit_reply_markup.await_args.kwargs["reply_markup"].inline_keyboard
     assert all(b.text != "Подписаться" for row in remaining for b in row)
