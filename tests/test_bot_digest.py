@@ -25,7 +25,8 @@ def test_digest_without_feeds_deletes_command(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("command", ["/digest", "/digest all", "/digest@mybot  "])
-def test_digest_all_only_uses_subscription_sources(monkeypatch, tmp_path, command):
+@pytest.mark.parametrize("sent", [0, 2])
+def test_digest_all_only_uses_subscription_sources(monkeypatch, tmp_path, command, sent):
     init_engine(tmp_path / "bot.sqlite")
     with session_scope() as s:
         user = User(chat_id=123, tz="UTC")
@@ -47,7 +48,7 @@ def test_digest_all_only_uses_subscription_sources(monkeypatch, tmp_path, comman
             if source_type == "event_ics":
                 event_feed_id = feed.id
 
-    send = AsyncMock(return_value=0)
+    send = AsyncMock(return_value=sent)
     monkeypatch.setattr(bot, "_ensure_user_id", lambda _message: user_id)
     monkeypatch.setattr(bot, "DEPS", SimpleNamespace(scheduler=SimpleNamespace(_send_digest_for_feed=send)))
     message = SimpleNamespace(text=command, answer=AsyncMock(), delete=AsyncMock())
@@ -56,7 +57,7 @@ def test_digest_all_only_uses_subscription_sources(monkeypatch, tmp_path, comman
 
     assert send.await_count == 2
     assert all(call.kwargs == {"update_last_digest_at": False} for call in send.await_args_list)
-    message.answer.assert_awaited_once_with("Отправлено записей: 0 (проверено лент: 2).")
+    message.answer.assert_not_awaited()
     message.delete.assert_awaited_once()
 
     message.text = f"/digest {event_feed_id}"

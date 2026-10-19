@@ -2338,10 +2338,8 @@ async def cmd_digest(message: Message) -> None:
     if not feed_ids:
         await message.answer("Нет активных лент в режиме digest или on_demand.")
     else:
-        sent = 0
         for fid in feed_ids:
-            sent += await DEPS.scheduler._send_digest_for_feed(fid, update_last_digest_at=False)
-        await message.answer(f"Отправлено записей: {sent} (проверено лент: {len(feed_ids)}).")
+            await DEPS.scheduler._send_digest_for_feed(fid, update_last_digest_at=False)
     try:
         await message.delete()
     except Exception as exc:
