@@ -1391,6 +1391,7 @@ def _someday_markup(view_id: int, page: int, cards: list[CardEntry], has_more: b
         )
     if navigation:
         rows.append(navigation)
+    rows.append([InlineKeyboardButton(text="Закрыть", callback_data="sm:close")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1456,6 +1457,15 @@ async def cb_someday(callback: CallbackQuery) -> None:
     message = callback.message
     if message is None or not _is_allowed(message.chat.id):
         await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    if callback.data == "sm:close":
+        try:
+            await message.delete()
+        except Exception as exc:
+            logging.debug("Could not close /someday list message: %s", exc)
+            await callback.answer("Не удалось удалить сообщение.", show_alert=True)
+        else:
+            await callback.answer()
         return
     with session_scope() as session:
         user = session.query(User).filter(User.chat_id == message.chat.id).first()

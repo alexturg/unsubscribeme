@@ -226,12 +226,13 @@ def test_someday_command_more_back_and_finish_in_one_message(tmp_path, monkeypat
     asyncio.run(bot_module.cmd_someday(message))
     message.delete.assert_awaited_once()
     assert "страница 1" in message.text
-    more = message.markup.inline_keyboard[-1][-1].callback_data
+    assert message.markup.inline_keyboard[-1][0].text == "Закрыть"
+    more = message.markup.inline_keyboard[-2][-1].callback_data
     assert more.startswith("sm:m:")
     asyncio.run(bot_module.cb_someday(Callback(message, more)))
     assert "страница 2" in message.text
-    assert len(message.markup.inline_keyboard) == 3  # two cards and navigation
-    back = message.markup.inline_keyboard[-1][0].callback_data
+    assert len(message.markup.inline_keyboard) == 4  # two cards, navigation, and close
+    back = message.markup.inline_keyboard[-2][0].callback_data
     asyncio.run(bot_module.cb_someday(Callback(message, back)))
     assert "страница 1" in message.text
     first_action = message.markup.inline_keyboard[0][0].callback_data
@@ -239,6 +240,12 @@ def test_someday_command_more_back_and_finish_in_one_message(tmp_path, monkeypat
     assert "страница 1" in message.text
     with session_scope() as session:
         assert session.query(CardEntry).filter(CardEntry.status == "done").count() == 1
+    close = message.markup.inline_keyboard[-1][0].callback_data
+    assert close == "sm:close"
+    asyncio.run(bot_module.cb_someday(Callback(message, close)))
+    assert message.delete.await_count == 2  # command and list
+    with session_scope() as session:
+        assert session.query(CardEntry).filter(CardEntry.status == "someday").count() == 11
 
 
 def test_card_choice_saves_before_deleting_all_ai_messages(tmp_path, monkeypatch):
