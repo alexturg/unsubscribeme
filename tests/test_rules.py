@@ -1,5 +1,6 @@
 from rssbot.rules import Content, matches_rules
 from rssbot.db import FeedRule
+import pytest
 
 
 def test_rules_include_exclude_keywords():
@@ -39,3 +40,23 @@ def test_rules_duration_bounds():
     assert matches_rules(Content(title="A", duration_sec=10), rules) is False
     assert matches_rules(Content(title="A", duration_sec=7200), rules) is False
 
+
+@pytest.mark.parametrize("link,allowed", [
+    ("https://www.youtube.com/shorts/abc?feature=share", False),
+    ("https://youtube.com/shorts/abc", False),
+    ("https://m.youtube.com/shorts/abc", False),
+    ("https://www.youtube.com/watch?v=abc", True),
+    ("https://example.com/shorts/abc", True),
+    ("https://youtube.com.example.com/shorts/abc", True),
+    ("", True),
+    ("https://[invalid", True),
+])
+def test_exclude_shorts_uses_youtube_link_without_duration(link, allowed):
+    rules = FeedRule(feed_id=1, exclude_shorts=True)
+    assert matches_rules(Content(title="Regular title", link=link), rules) is allowed
+
+
+def test_shorts_allowed_unless_explicitly_excluded():
+    content = Content(title="Short", link="https://www.youtube.com/shorts/abc")
+    assert matches_rules(content, None)
+    assert matches_rules(content, FeedRule(feed_id=1, exclude_shorts=False))

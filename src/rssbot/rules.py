@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Iterable, Optional
+from urllib.parse import urlsplit
 
 from .db import FeedRule
 
@@ -13,6 +14,7 @@ class Content:
     description: str = ""
     categories: Optional[Iterable[str]] = None
     duration_sec: Optional[int] = None
+    link: str = ""
 
 
 def _normalize(text: str, case_sensitive: bool) -> str:
@@ -62,6 +64,15 @@ def matches_rules(content: Content, rules: Optional[FeedRule]) -> bool:
     if rules is None:
         return True
 
+    if rules.exclude_shorts:
+        try:
+            url = urlsplit(content.link)
+            host = (url.hostname or "").lower()
+            if (host == "youtube.com" or host.endswith(".youtube.com")) and url.path.startswith("/shorts/"):
+                return False
+        except ValueError:
+            pass
+
     text = (content.title or "") + "\n" + (content.description or "")
     categories = [c.lower() for c in (content.categories or [])]
 
@@ -95,4 +106,3 @@ def matches_rules(content: Content, rules: Optional[FeedRule]) -> bool:
         include_blocks.append(_any_regex(text, rules.include_regex, rules.case_sensitive))
 
     return all(include_blocks) if include_blocks else True
-

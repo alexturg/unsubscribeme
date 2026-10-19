@@ -207,6 +207,7 @@ class BotScheduler:
                 description="",
                 categories=item.categories,
                 duration_sec=item.duration_sec,
+                link=item.link or "",
             )
             # Skip future items (scheduled/premieres) until available_at
             settings = Settings()
@@ -365,6 +366,7 @@ class BotScheduler:
                     description="",
                     categories=item.categories,
                     duration_sec=item.duration_sec,
+                    link=item.link or "",
                 )
                 if not matches_rules(content, feed.rules):
                     continue
@@ -486,6 +488,7 @@ class BotScheduler:
                     title=it.title or "",
                     categories=it.categories,
                     duration_sec=it.duration_sec,
+                    link=it.link or "",
                 )
                 if settings.HIDE_FUTURE_VIDEOS:
                     available_at = compute_available_at(it.title or "", it.published_at)
@@ -572,6 +575,7 @@ class BotScheduler:
                 description="",
                 categories=item.categories,
                 duration_sec=item.duration_sec,
+                link=item.link or "",
             )
             # Skip future items
             settings = Settings()

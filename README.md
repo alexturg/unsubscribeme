@@ -269,6 +269,17 @@ AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_REQUEST_TIMEOUT_SEC=6
 /setfilter 1 {"include_keywords":["обзор"],"exclude_keywords":["стрим"]}
 ```
 
+Исключить YouTube Shorts из всех текущих лент, сохранив остальные фильтры:
+
+```text
+/setfilter all {"exclude_shorts":true}
+```
+
+Вместо `all` можно указать ID одной ленты; `false` отключает исключение.
+Настройка распознаёт Shorts по ссылке `youtube.com/shorts/…` и действует во всех
+режимах доставки. Ролики с обычной ссылкой `watch?v=…` по ней не распознаются.
+Уже отправленные карточки сохраняются. Новым подпискам настройку нужно включить отдельно.
+
 ## Форматы источников событий
 
 ### JSON (`/addeventsource ... type=json`)

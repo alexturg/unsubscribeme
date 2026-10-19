@@ -86,6 +86,7 @@ class FeedRule(Base):
     categories: Mapped[Optional[list[str]]] = mapped_column(JSON, nullable=True)
     min_duration_sec: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     max_duration_sec: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    exclude_shorts: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     feed: Mapped[Feed] = relationship("Feed", back_populates="rules")
@@ -205,6 +206,12 @@ def init_engine(db_path: Path) -> Engine:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(f"sqlite:///{db_path}", future=True, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        columns = {column["name"] for column in inspect(connection).get_columns("feed_rules")}
+        if "exclude_shorts" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE feed_rules ADD COLUMN exclude_shorts BOOLEAN NOT NULL DEFAULT 0"
+            )
     with engine.begin() as connection:
         columns = {column["name"] for column in inspect(connection).get_columns("feeds")}
         if "digest_weekday" not in columns:

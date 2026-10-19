@@ -2276,7 +2276,7 @@ async def cmd_setmode(message: Message) -> None:
 async def cmd_setfilter(message: Message) -> None:
     """Установить фильтры для ленты.
 
-    Формат: /setfilter <feed_id> <json>
+    Формат: /setfilter <feed_id|all> <json>
     Пример: /setfilter 1 {"include_keywords": ["обзор"], "exclude_keywords": ["стрим"]}
     """
     user_id = _ensure_user_id(message)
@@ -2286,12 +2286,12 @@ async def cmd_setfilter(message: Message) -> None:
     parts = (message.text or "").split(maxsplit=2)
     if len(parts) < 3:
         await message.answer(
-            'Использование: /setfilter <feed_id> <json>\n'
+            'Использование: /setfilter <feed_id|all> <json>\n'
             'Пример: /setfilter 1 {"include_keywords": ["обзор"], "exclude_keywords": ["стрим"]}'
         )
         return
     try:
-        feed_id = int(parts[1])
+        feed_id = None if parts[1].lower() == "all" else int(parts[1])
     except Exception:
         await message.answer("Неверный id.")
         return
@@ -2300,35 +2300,48 @@ async def cmd_setfilter(message: Message) -> None:
     except json.JSONDecodeError as e:
         await message.answer(f"Неверный JSON: {str(e)}")
         return
+    if not isinstance(filter_data, dict):
+        await message.answer("Фильтры должны быть JSON-объектом.")
+        return
+    if "exclude_shorts" in filter_data and not isinstance(filter_data["exclude_shorts"], bool):
+        await message.answer("exclude_shorts должен быть true или false.")
+        return
     with session_scope() as s:
-        feed = s.get(Feed, feed_id)
-        if not feed or feed.user_id != user_id:
+        if feed_id is None:
+            feeds = s.query(Feed).filter(Feed.user_id == user_id).all()
+        else:
+            feed = s.get(Feed, feed_id)
+            feeds = [feed] if feed and feed.user_id == user_id else []
+        if not feeds:
             await message.answer("Лента не найдена.")
             return
-        # Get or create rules
-        rules = feed.rules
-        if not rules:
-            rules = FeedRule(feed_id=feed_id)
-            s.add(rules)
-        # Update rules from JSON
-        if "include_keywords" in filter_data:
-            rules.include_keywords = filter_data["include_keywords"]
-        if "exclude_keywords" in filter_data:
-            rules.exclude_keywords = filter_data["exclude_keywords"]
-        if "include_regex" in filter_data:
-            rules.include_regex = filter_data["include_regex"]
-        if "exclude_regex" in filter_data:
-            rules.exclude_regex = filter_data["exclude_regex"]
-        if "require_all" in filter_data:
-            rules.require_all = bool(filter_data["require_all"])
-        if "case_sensitive" in filter_data:
-            rules.case_sensitive = bool(filter_data["case_sensitive"])
-        if "categories" in filter_data:
-            rules.categories = filter_data["categories"]
-        if "min_duration_sec" in filter_data:
-            rules.min_duration_sec = filter_data["min_duration_sec"]
-        if "max_duration_sec" in filter_data:
-            rules.max_duration_sec = filter_data["max_duration_sec"]
+        for feed in feeds:
+            # Get or create rules
+            rules = feed.rules
+            if not rules:
+                rules = FeedRule(feed_id=feed.id)
+                s.add(rules)
+            # Update rules from JSON
+            if "include_keywords" in filter_data:
+                rules.include_keywords = filter_data["include_keywords"]
+            if "exclude_keywords" in filter_data:
+                rules.exclude_keywords = filter_data["exclude_keywords"]
+            if "include_regex" in filter_data:
+                rules.include_regex = filter_data["include_regex"]
+            if "exclude_regex" in filter_data:
+                rules.exclude_regex = filter_data["exclude_regex"]
+            if "require_all" in filter_data:
+                rules.require_all = bool(filter_data["require_all"])
+            if "case_sensitive" in filter_data:
+                rules.case_sensitive = bool(filter_data["case_sensitive"])
+            if "categories" in filter_data:
+                rules.categories = filter_data["categories"]
+            if "min_duration_sec" in filter_data:
+                rules.min_duration_sec = filter_data["min_duration_sec"]
+            if "max_duration_sec" in filter_data:
+                rules.max_duration_sec = filter_data["max_duration_sec"]
+            if "exclude_shorts" in filter_data:
+                rules.exclude_shorts = filter_data["exclude_shorts"]
     await message.answer("Фильтры обновлены.")
 
 
