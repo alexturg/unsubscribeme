@@ -220,6 +220,59 @@ def test_youtube_oembed_title_reads_metadata_and_normalizes_spaces(monkeypatch):
     assert youtube_context.fetch_video_title("ia2QItAmyE8") == "Название видео & текст"
 
 
+@pytest.mark.parametrize("failure", ["401", "missing_title", "timeout"])
+def test_video_title_falls_back_to_watch_player(tmp_path, monkeypatch, failure):
+    import urllib.error
+
+    _setup(tmp_path, monkeypatch)
+    expected = 'Почему вы не говорите бегло по-английски? <Секрет> & "BREAKING BAD"'
+    channel_id = "UC" + "a" * 22
+    calls = []
+
+    class Response:
+        def __init__(self, content):
+            self.content = content
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def read(self, _limit):
+            return self.content.encode()
+
+    def urlopen(request, timeout):
+        path = urlparse(request.full_url).path
+        calls.append(path)
+        if path == "/oembed":
+            if failure == "401":
+                raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, None)
+            if failure == "timeout":
+                raise TimeoutError()
+            return Response("{}")
+        assert path == "/watch"
+        return Response("var ytInitialPlayerResponse = " + json.dumps({
+            "videoDetails": {"title": expected, "channelId": channel_id, "lengthSeconds": "1844"},
+        }) + ";")
+
+    monkeypatch.setattr(youtube_context.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(bot, "fetch_video_metadata", youtube_context.fetch_video_metadata)
+    monkeypatch.setattr(bot, "get_channel_id", lambda *_a, **_k: channel_id)
+    monkeypatch.setattr(youtube_context, "fetch_video_duration", lambda *_a, **_k: 1844)
+    message = _message("https://www.youtube.com/watch?v=Wo6oRqVtPmw")
+    asyncio.run(bot.cmd_plain_link(message))
+    text = message.answer.await_args.args[0]
+    assert "Почему вы не говорите бегло по-английски?" in text
+    assert "&lt;Секрет&gt; &amp;" in text
+    assert "</a> (30:44)" in text
+    assert calls == ["/oembed", "/watch"]
+    with session_scope() as session:
+        card = session.query(CardEntry).one()
+        assert card.title == expected
+        assert card.youtube_channel_id == channel_id
+
+
 CHANNEL_ID = "UC_x5XG1OV2P6uZZ5FSM9Ttw"
 
 

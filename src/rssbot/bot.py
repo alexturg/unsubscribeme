@@ -550,7 +550,7 @@ async def _page_title_for_link(link: str) -> str:
         else:
             try:
                 return await asyncio.wait_for(
-                    asyncio.to_thread(fetch_video_title, video_id, timeout_sec=3), timeout=4,
+                    asyncio.to_thread(fetch_video_title, video_id, timeout_sec=3), timeout=7,
                 )
             except Exception as exc:
                 logging.debug("Could not read YouTube video title for %s: %s", video_id, exc)
@@ -591,7 +591,7 @@ async def _link_card_details(link: str) -> tuple[str, Optional[str]]:
         try:
             video_id = extract_video_id(link)
             metadata = await asyncio.wait_for(
-                asyncio.to_thread(fetch_video_metadata, video_id, timeout_sec=3), timeout=4,
+                asyncio.to_thread(fetch_video_metadata, video_id, timeout_sec=3), timeout=7,
             )
         except Exception:
             pass

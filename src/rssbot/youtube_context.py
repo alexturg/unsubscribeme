@@ -36,8 +36,7 @@ class VideoContextError(RuntimeError):
     """Raised when fallback YouTube context could not be extracted."""
 
 
-def fetch_video_duration(video_id: str, *, timeout_sec: int = 3) -> int | None:
-    """Read the player duration; live streams and unavailable metadata have no duration."""
+def _fetch_watch_player(video_id: str, *, timeout_sec: int = 3) -> tuple[dict, str]:
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
         raise VideoContextError("Invalid YouTube video ID")
     request = urllib.request.Request(
@@ -47,6 +46,12 @@ def fetch_video_duration(video_id: str, *, timeout_sec: int = 3) -> int | None:
     with urllib.request.urlopen(request, timeout=timeout_sec) as response:
         raw_html = response.read(2_000_000).decode("utf-8", errors="replace")
     player = _extract_json_by_markers(raw_html, PLAYER_RESPONSE_MARKERS) or {}
+    return player, raw_html
+
+
+def fetch_video_duration(video_id: str, *, timeout_sec: int = 3) -> int | None:
+    """Read the player duration; live streams and unavailable metadata have no duration."""
+    player, _ = _fetch_watch_player(video_id, timeout_sec=timeout_sec)
     details = player.get("videoDetails") or {}
     if not isinstance(details, dict) or details.get("isLive"):
         return None
@@ -80,7 +85,7 @@ class VideoMetadata:
     channel_url: str | None = None
 
 
-def fetch_video_metadata(video_id: str, *, timeout_sec: int = 3) -> VideoMetadata:
+def _fetch_oembed_metadata(video_id: str, *, timeout_sec: int = 3) -> VideoMetadata:
     """Read lightweight video metadata without fetching captions or the watch page."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
         raise VideoContextError("Invalid YouTube video ID")
@@ -107,6 +112,25 @@ def fetch_video_metadata(video_id: str, *, timeout_sec: int = 3) -> VideoMetadat
     else:
         channel_url = None
     return VideoMetadata(_normalize_space(title)[:500], channel_url)
+
+
+def fetch_video_metadata(video_id: str, *, timeout_sec: int = 3) -> VideoMetadata:
+    """Use the watch page when oEmbed rejects a video or returns no title."""
+    try:
+        return _fetch_oembed_metadata(video_id, timeout_sec=timeout_sec)
+    except (OSError, ValueError, VideoContextError):
+        player, raw_html = _fetch_watch_player(video_id, timeout_sec=timeout_sec)
+        title = _extract_title(player, raw_html)
+        if not title or title.casefold() == "youtube":
+            raise VideoContextError("YouTube returned no video title")
+        details = player.get("videoDetails") or {}
+        channel_id = details.get("channelId") if isinstance(details, dict) else None
+        channel_url = (
+            f"https://www.youtube.com/channel/{channel_id}"
+            if isinstance(channel_id, str) and re.fullmatch(r"UC[A-Za-z0-9_-]{22}", channel_id)
+            else None
+        )
+        return VideoMetadata(title[:500], channel_url)
 
 
 def fetch_video_title(video_id: str, *, timeout_sec: int = 3) -> str:
