@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 import argparse
+import json
+from html.parser import HTMLParser
 import os
 import re
 import ssl
@@ -10,15 +12,6 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 CHANNEL_ID_RE = re.compile(r"(UC[a-zA-Z0-9_-]{22})")
-
-HTML_PATTERNS = [
-    r'itemprop="channelId" content="(UC[a-zA-Z0-9_-]{22})"',
-    r'"channelId":"(UC[a-zA-Z0-9_-]{22})"',
-    r'"externalId":"(UC[a-zA-Z0-9_-]{22})"',
-    r'"browseId":"(UC[a-zA-Z0-9_-]{22})"',
-    r'<link rel="canonical" href="https?://www\.youtube\.com/channel/(UC[a-zA-Z0-9_-]{22})"',
-]
-
 
 def normalize_url(url: str) -> str:
     url = url.strip()
@@ -75,13 +68,46 @@ def fetch_html(url: str, timeout: float, insecure: bool, ca_bundle: str | None) 
 
 
 def extract_from_html(html: str) -> str | None:
-    for pattern in HTML_PATTERNS:
-        match = re.search(pattern, html)
-        if match:
-            return match.group(1)
-    match = CHANNEL_ID_RE.search(html)
-    if match:
-        return match.group(1)
+    # Recommendations contain many unrelated channel IDs. Only page ownership
+    # metadata may identify the channel being viewed.
+    class PageMetadata(HTMLParser):
+        canonical_id: str | None = None
+        channel_id: str | None = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "link" and "canonical" in (attrs.get("rel") or "").lower().split():
+                parsed = urlparse(attrs.get("href") or "")
+                host = (parsed.hostname or "").lower()
+                if host == "youtube.com" or host.endswith(".youtube.com"):
+                    self.canonical_id = extract_from_path(parsed.path)
+            if tag == "meta" and attrs.get("itemprop") == "channelId":
+                value = attrs.get("content") or ""
+                if CHANNEL_ID_RE.fullmatch(value):
+                    self.channel_id = value
+
+    metadata = PageMetadata()
+    metadata.feed(html)
+    if metadata.canonical_id:
+        return metadata.canonical_id
+    markers = ("var ytInitialData =", "ytInitialData =", "window['ytInitialData'] =", 'window["ytInitialData"] =')
+    for marker in markers:
+        pos = html.find(marker)
+        if pos < 0:
+            continue
+        try:
+            data, _ = json.JSONDecoder().raw_decode(html[pos + len(marker):].lstrip())
+        except ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        page_metadata = data.get("metadata")
+        renderer = page_metadata.get("channelMetadataRenderer") if isinstance(page_metadata, dict) else None
+        value = renderer.get("externalId") if isinstance(renderer, dict) else None
+        if isinstance(value, str) and CHANNEL_ID_RE.fullmatch(value):
+            return value
+    if metadata.channel_id:
+        return metadata.channel_id
     return None
 
 

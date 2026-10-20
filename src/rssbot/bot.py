@@ -1759,7 +1759,20 @@ async def cb_subscribe_card(callback: CallbackQuery) -> None:
         ):
             await callback.answer("Запись недоступна.", show_alert=True)
             return
-        user_id, channel_id = user.id, card.youtube_channel_id
+        user_id, channel_id, link = user.id, card.youtube_channel_id, card.link
+    # Old cards may contain an ID extracted from channel recommendations.
+    # Resolve ownership again before creating or re-enabling a subscription.
+    _, verified_channel_id = await _link_card_details(link or "")
+    if not _looks_like_channel_id(verified_channel_id or ""):
+        await callback.answer("Не удалось проверить канал. Попробуй ещё раз.", show_alert=True)
+        return
+    channel_id = verified_channel_id
+    with session_scope() as session:
+        card = session.get(CardEntry, card_id)
+        if card is None or card.user_id != user_id:
+            await callback.answer("Запись недоступна.", show_alert=True)
+            return
+        card.youtube_channel_id = channel_id
         feed = _channel_feed(session, user_id, channel_id)
         existing = feed is not None
         already_enabled = existing and feed.enabled

@@ -311,7 +311,8 @@ def _subscription_callback(message, card_id):
     )
 
 
-def test_subscribe_button_creates_and_schedules_channel_once(tmp_path, monkeypatch):
+@pytest.mark.parametrize("stale_channel", [False, True])
+def test_subscribe_button_creates_and_schedules_channel_once(tmp_path, monkeypatch, stale_channel):
     _setup(tmp_path, monkeypatch)
     _with_channel(monkeypatch)
     scheduler = SimpleNamespace(schedule_feed_poll=Mock())
@@ -326,11 +327,14 @@ def test_subscribe_button_creates_and_schedules_channel_once(tmp_path, monkeypat
     message.edit_reply_markup = AsyncMock()
     with session_scope() as session:
         card_id = session.query(CardEntry.id).scalar()
+        if stale_channel:
+            session.get(CardEntry, card_id).youtube_channel_id = "UCXYvxL4zw64tEcCY7iYMeyQ"
     callback = _subscription_callback(message, card_id)
     asyncio.run(bot.cb_subscribe_card(callback))
     asyncio.run(bot.cb_subscribe_card(callback))
     with session_scope() as session:
         feed = session.query(Feed).one()
+        assert session.get(CardEntry, card_id).youtube_channel_id == CHANNEL_ID
         assert feed.url == f"https://www.youtube.com/feeds/videos.xml?channel_id={CHANNEL_ID}"
         assert feed.enabled
         assert feed.mode == "digest"
@@ -343,6 +347,7 @@ def test_subscribe_button_creates_and_schedules_channel_once(tmp_path, monkeypat
 
 def test_subscribe_reenables_muted_feed_without_changing_settings(tmp_path, monkeypatch):
     user_id = _setup(tmp_path, monkeypatch)
+    _with_channel(monkeypatch)
     card_id = bot.ensure_link_card(
         77, 100, "https://youtu.be/dQw4w9WgXcQ", "Video", CHANNEL_ID,
     )
@@ -377,6 +382,17 @@ def test_subscribe_callback_rejects_another_users_card(tmp_path, monkeypatch):
     callback = _subscription_callback(message, card_id)
     asyncio.run(bot.cb_subscribe_card(callback))
     callback.answer.assert_awaited_once_with("Запись недоступна.", show_alert=True)
+    with session_scope() as session:
+        assert session.query(Feed).count() == 0
+
+
+def test_subscribe_does_not_use_stored_channel_when_verification_fails(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    card_id = bot.ensure_link_card(77, 100, "https://youtu.be/dQw4w9WgXcQ", "Video", CHANNEL_ID)
+    monkeypatch.setattr(bot, "_link_card_details", AsyncMock(return_value=("Video", None)))
+    callback = _subscription_callback(_message(""), card_id)
+    asyncio.run(bot.cb_subscribe_card(callback))
+    callback.answer.assert_awaited_once_with("Не удалось проверить канал. Попробуй ещё раз.", show_alert=True)
     with session_scope() as session:
         assert session.query(Feed).count() == 0
 
