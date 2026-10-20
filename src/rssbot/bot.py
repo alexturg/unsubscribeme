@@ -44,7 +44,7 @@ from .scheduler import BotScheduler, is_digest_source
 from .digest_schedule import digest_day_label, parse_digest_day
 from .rss import fetch_and_store_event_source, fetch_and_store_latest_item
 from .web_summarize import _is_reddit_host, fetch_webpage_content
-from .youtube_context import fetch_video_metadata, fetch_video_title
+from .youtube_context import fetch_video_metadata, fetch_video_title, video_duration_for_link
 from .ai_summarizer import (
     AiSummarizerError,
     parse_ai_request_text,
@@ -868,7 +868,7 @@ async def _run_ai_summary(
 _AI_CARD_JOBS: set[tuple[int, int]] = set()
 
 
-def _ai_card_page(title, link, body, card_id, page=0, extra_rows=None):
+def _ai_card_page(title, link, body, card_id, page=0, extra_rows=None, duration_sec=None):
     # Half the character budget also accommodates characters using two UTF-16
     # units, which Telegram counts towards its message length limit.
     label = (title or link or "AI")[:150]
@@ -883,7 +883,7 @@ def _ai_card_page(title, link, body, card_id, page=0, extra_rows=None):
             buttons.append(InlineKeyboardButton(text="→", callback_data=f"ai:page:{card_id}:{page + 1}"))
         rows.append(buttons)
     counter = f"\n\n{page + 1}/{len(chunks)}" if len(chunks) > 1 else ""
-    text = f"{linked_title(label, link)}\n\n{html_escape(chunks[page], quote=False)}{counter}"
+    text = f"{linked_title(label, link, duration_sec)}\n\n{html_escape(chunks[page], quote=False)}{counter}"
     return text, choice_keyboard(card_id, rows + _subscription_rows(card_id))
 
 
@@ -905,9 +905,10 @@ async def _run_ai_summary_in_card(
             if user is None or card is None or card.user_id != user.id:
                 return False
             title, link = card.title, card.link
+            duration_sec = card.duration_sec
         start = "Запускаю Whisper-транскрипцию и суммаризацию…" if force_whisper else "Запускаю суммаризацию…"
         await message.edit_text(
-            f"{linked_title(title[:150], link)}\n\n{start}",
+            f"{linked_title(title[:150], link, duration_sec)}\n\n{start}",
             parse_mode="HTML", reply_markup=None, disable_web_page_preview=True,
         )
         try:
@@ -922,7 +923,7 @@ async def _run_ai_summary_in_card(
             rows = [[InlineKeyboardButton(text="Повторить /ai", callback_data=retry_callback)]] if retry_callback else []
             text, markup = _ai_card_page(
                 title, link, f"Не удалось сделать суммаризацию.\nОшибка: {error}",
-                card_id, extra_rows=rows,
+                card_id, extra_rows=rows, duration_sec=duration_sec,
             )
             await message.edit_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
             return False
@@ -942,7 +943,7 @@ async def _run_ai_summary_in_card(
                 text="Сделать транскрипцию через Whisper",
                 callback_data=f"ai:whisper:{result.video_id}",
             )])
-        text, markup = _ai_card_page(title, link, body, card_id, extra_rows=rows)
+        text, markup = _ai_card_page(title, link, body, card_id, extra_rows=rows, duration_sec=duration_sec)
         await message.edit_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
         return True
     except Exception:
@@ -971,9 +972,10 @@ async def cb_ai_page(callback: CallbackQuery) -> None:
             await callback.answer("Запись недоступна.", show_alert=True)
             return
         title, link, body = card.title, card.link, card.body
+        duration_sec = card.duration_sec
     rows = [row for row in (message.reply_markup.inline_keyboard if message.reply_markup else [])
             if any((button.callback_data or "").startswith("ai:whisper:") for button in row)]
-    text, markup = _ai_card_page(title, link, body, card_id, page, rows)
+    text, markup = _ai_card_page(title, link, body, card_id, page, rows, duration_sec)
     await callback.answer()
     try:
         await message.edit_text(text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True)
@@ -1456,10 +1458,8 @@ def _someday_text(page: int, cards: list[CardEntry], has_more: bool) -> str:
         return f"{heading}\nСписок пуст."
     lines = [heading]
     for number, card in enumerate(cards, start=1):
-        title = html_escape(card.title[:160], quote=False)
         link = (card.link or "").strip()
-        if link.startswith(("https://", "http://")):
-            title = f'<a href="{html_escape(link, quote=True)}">{title}</a>'
+        title = linked_title(card.title[:160], link, card.duration_sec)
         lines.append(f"{number}. {title}")
         if card.kind == "ai" and card.body:
             preview = " ".join(card.body.split())[:150]
@@ -2571,13 +2571,15 @@ async def cmd_plain_link(message: Message) -> None:
         await message.answer("Доступ запрещён.")
         return
     title, channel_id = await _link_card_details(link)
+    duration_sec = await video_duration_for_link(link)
     card_id = ensure_link_card(
         message.chat.id, message.message_id, link, title, youtube_channel_id=channel_id,
+        duration_sec=duration_sec,
     )
     row = [InlineKeyboardButton(text="Сделать /ai", callback_data=f"ai:link:{card_id}")]
     try:
         sent = await message.answer(
-            f"Ссылка: {linked_title(title, link)}",
+            f"Ссылка: {linked_title(title, link, duration_sec)}",
             reply_markup=choice_keyboard(card_id, [row] + _subscription_rows(card_id)),
         )
     except Exception as exc:

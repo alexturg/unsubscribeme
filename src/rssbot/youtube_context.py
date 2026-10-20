@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import asyncio
 import json
 import re
 import urllib.error
@@ -33,6 +34,44 @@ PLAYER_RESPONSE_MARKERS = (
 
 class VideoContextError(RuntimeError):
     """Raised when fallback YouTube context could not be extracted."""
+
+
+def fetch_video_duration(video_id: str, *, timeout_sec: int = 3) -> int | None:
+    """Read the player duration; live streams and unavailable metadata have no duration."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        raise VideoContextError("Invalid YouTube video ID")
+    request = urllib.request.Request(
+        f"https://www.youtube.com/watch?v={video_id}",
+        headers={"User-Agent": DEFAULT_USER_AGENT},
+    )
+    with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        raw_html = response.read(2_000_000).decode("utf-8", errors="replace")
+    player = _extract_json_by_markers(raw_html, PLAYER_RESPONSE_MARKERS) or {}
+    details = player.get("videoDetails") or {}
+    if not isinstance(details, dict) or details.get("isLive"):
+        return None
+    value = details.get("lengthSeconds")
+    if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).isdigit():
+        duration = int(value)
+        return duration if duration > 0 else None
+    return None
+
+
+async def video_duration_for_link(link: str) -> int | None:
+    from .youtube_transcribe import extract_video_id
+
+    host = (urlparse(link).hostname or "").lower()
+    if host not in {"youtu.be", "www.youtu.be", "youtube.com", "youtube-nocookie.com"} and not host.endswith(
+        (".youtube.com", ".youtube-nocookie.com")
+    ):
+        return None
+    try:
+        video_id = extract_video_id(link)
+        return await asyncio.wait_for(
+            asyncio.to_thread(fetch_video_duration, video_id, timeout_sec=3), timeout=4,
+        )
+    except Exception:
+        return None
 
 
 @dataclass(frozen=True)

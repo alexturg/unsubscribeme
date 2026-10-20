@@ -14,6 +14,7 @@ from rssbot.db import CardEntry, CardMessage, Feed, FeedRule, User, init_engine,
 
 
 def _setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(youtube_context, "fetch_video_duration", lambda *_a, **_k: None)
     init_engine(tmp_path / "bot.sqlite")
     with session_scope() as session:
         user = User(chat_id=77)
@@ -76,6 +77,18 @@ def test_plain_web_link_has_ai_button_and_linked_title(tmp_path, monkeypatch):
     assert [button.text for button in markup.inline_keyboard[0]] == ["Сделать /ai"]
     assert "&amp;" in message.answer.await_args.args[0]
     message.delete.assert_awaited_once()
+
+
+def test_video_duration_is_shown_and_saved_for_someday(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(youtube_context, "fetch_video_duration", lambda *_a, **_k: 3754)
+    message = _message("https://youtu.be/dQw4w9WgXcQ")
+    asyncio.run(bot.cmd_plain_link(message))
+    assert "</a> (1:02:34)" in message.answer.await_args.args[0]
+    with session_scope() as session:
+        card = session.query(CardEntry).one()
+        assert card.duration_sec == 3754
+        assert "</a> (1:02:34)" in bot._someday_text(1, [card], False)
 
 
 def test_non_link_or_failed_send_keeps_original(tmp_path, monkeypatch):

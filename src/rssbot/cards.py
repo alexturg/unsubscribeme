@@ -11,16 +11,22 @@ from sqlalchemy import and_, or_
 from .db import CardEntry, CardMessage, Feed, Item, SomedayView, User, session_scope
 
 
-def linked_title(title: str, link: str) -> str:
+def linked_title(title: str, link: str, duration_sec: int | None = None) -> str:
     """Render a safe Telegram HTML title that opens the source when possible."""
     label = html_escape((title or "").strip() or link or "(без названия)", quote=False)
+    suffix = ""
+    if duration_sec is not None and duration_sec > 0:
+        hours, remainder = divmod(duration_sec, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        duration = f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+        suffix = f" ({duration})"
     try:
         parsed = urlparse((link or "").strip())
         if parsed.scheme.lower() in {"http", "https"} and parsed.hostname:
-            return f'<a href="{html_escape(link, quote=True)}">{label}</a>'
+            return f'<a href="{html_escape(link, quote=True)}">{label}</a>{suffix}'
     except ValueError:
         pass
-    return label
+    return label + suffix
 
 
 def choice_keyboard(
@@ -60,9 +66,12 @@ def ensure_item_card(chat_id: int, item_id: int) -> int:
                 kind="event" if (feed.type or "").startswith("event_") else "feed",
                 title=item.title or "(без названия)",
                 link=item.link,
+                duration_sec=item.duration_sec,
             )
             session.add(card)
             session.flush()
+        elif item.duration_sec is not None:
+            card.duration_sec = item.duration_sec
         return card.id
 
 
@@ -87,6 +96,7 @@ def create_ai_card(chat_id: int, title: str, link: str, body: str) -> int:
 def ensure_link_card(
     chat_id: int, message_id: int, link: str, title: str,
     youtube_channel_id: str | None = None,
+    duration_sec: int | None = None,
 ) -> int:
     """Create one card per submitted message, preserving its link for Someday."""
     with session_scope() as session:
@@ -107,6 +117,7 @@ def ensure_link_card(
                 title=(title.strip() or link)[:500],
                 link=link,
                 youtube_channel_id=youtube_channel_id,
+                duration_sec=duration_sec,
             )
             session.add(card)
             session.flush()

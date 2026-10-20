@@ -144,6 +144,7 @@ class CardEntry(Base):
     chosen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     someday_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     youtube_channel_id: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
+    duration_sec: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
 
 class CardMessage(Base):
@@ -209,6 +210,8 @@ def init_engine(db_path: Path) -> Engine:
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
         columns = {column["name"] for column in inspect(connection).get_columns("card_entries")}
+        if "duration_sec" not in columns:
+            connection.exec_driver_sql("ALTER TABLE card_entries ADD COLUMN duration_sec INTEGER")
         if "youtube_channel_id" not in columns:
             connection.exec_driver_sql("ALTER TABLE card_entries ADD COLUMN youtube_channel_id VARCHAR(24)")
     with engine.begin() as connection:

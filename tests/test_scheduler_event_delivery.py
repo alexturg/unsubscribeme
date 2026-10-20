@@ -1,10 +1,16 @@
 import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, Mock
+import pytest
 
 from aiogram.types import InlineKeyboardMarkup
 from rssbot.db import Delivery, Feed, FeedBaseline, Item, User, init_engine, session_scope
 from rssbot.scheduler import BotScheduler
+
+
+@pytest.fixture(autouse=True)
+def stub_video_duration(monkeypatch):
+    monkeypatch.setattr("rssbot.youtube_context.fetch_video_duration", lambda *_a, **_k: None)
 
 
 class DummyBot:
@@ -284,7 +290,8 @@ def _seed_card_item(tmp_path, *, link: str) -> int:
         return item.id
 
 
-def test_send_video_message_attaches_ai_callback_for_item(tmp_path):
+def test_send_video_message_attaches_ai_callback_for_item(tmp_path, monkeypatch):
+    monkeypatch.setattr("rssbot.youtube_context.fetch_video_duration", lambda *_a, **_k: 754)
     item_id = _seed_card_item(tmp_path, link="https://www.youtube.com/watch?v=dQw4w9WgXcQ")
     bot = DummyBot()
     scheduler = BotScheduler(bot=bot)
@@ -305,6 +312,9 @@ def test_send_video_message_attaches_ai_callback_for_item(tmp_path):
     _, text, reply_markup = bot.messages[0]
     assert isinstance(reply_markup, InlineKeyboardMarkup)
     assert '<a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ">Video title</a>' in text
+    assert "</a> (12:34)" in text
+    with session_scope() as session:
+        assert session.get(Item, item_id).duration_sec == 754
     assert len(reply_markup.inline_keyboard) == 2
     assert len(reply_markup.inline_keyboard[0]) == 1
     assert reply_markup.inline_keyboard[0][0].text == "Сделать /ai"

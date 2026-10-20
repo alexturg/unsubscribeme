@@ -17,6 +17,7 @@ from .rules import Content, matches_rules
 from .rss import compute_available_at, event_identity_hash, fetch_and_store_event_source, fetch_and_store_feed
 from .config import Settings
 from .cards import choice_keyboard, ensure_item_card, linked_title, register_card_message
+from .youtube_context import video_duration_for_link
 
 
 @dataclass
@@ -175,7 +176,19 @@ class BotScheduler:
     ) -> tuple[str, Optional[str]]:
         normalized_feed_name = (feed_name or "").strip()
         feed_name_text = normalized_feed_name or "без названия ленты"
-        text = f"Новый ролик: {linked_title(title, link)} [{html_escape(feed_name_text, quote=False)}]"
+        duration_sec = None
+        if item_id is not None:
+            with session_scope() as session:
+                item = session.get(Item, item_id)
+                duration_sec = item.duration_sec if item else None
+        if duration_sec is None:
+            duration_sec = await video_duration_for_link(link)
+            if duration_sec is not None and item_id is not None:
+                with session_scope() as session:
+                    item = session.get(Item, item_id)
+                    if item:
+                        item.duration_sec = duration_sec
+        text = f"Новый ролик: {linked_title(title, link, duration_sec)} [{html_escape(feed_name_text, quote=False)}]"
         rows = (
             [[InlineKeyboardButton(text="Сделать /ai", callback_data=f"ai:item:{item_id}")]]
             if item_id is not None and _is_http_link(link)
