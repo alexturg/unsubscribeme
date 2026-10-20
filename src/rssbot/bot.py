@@ -2630,6 +2630,14 @@ async def cmd_plain_link(message: Message) -> None:
             except TelegramRetryAfter as exc:
                 if attempt == 2:
                     raise
+                # Telegram may rate-limit webpage preview generation itself.
+                # Retrying the same forced preview can repeat that error forever.
+                if preview is not None and not preview.is_disabled:
+                    preview = preview.model_copy(update={"is_disabled": True, "url": None, "prefer_large_media": None})
+                    logging.warning(
+                        "Retrying link card without preview for chat_id=%s after Telegram rate limit",
+                        message.chat.id,
+                    )
                 logging.info(
                     "Telegram delayed link card for chat_id=%s; retrying in %s seconds",
                     message.chat.id, exc.retry_after,

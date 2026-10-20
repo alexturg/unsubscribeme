@@ -145,7 +145,12 @@ def test_link_card_retries_after_telegram_rate_limit(tmp_path, monkeypatch, rate
     assert message.answer.await_count == rate_limits + 1
     assert sleep.await_count == rate_limits
     sleep.assert_awaited_with(8)
-    assert all(call == message.answer.await_args_list[0] for call in message.answer.await_args_list)
+    assert message.answer.await_args_list[0].kwargs["link_preview_options"].is_disabled is False
+    for call in message.answer.await_args_list[1:]:
+        assert call.kwargs["link_preview_options"].is_disabled is True
+        assert call.kwargs["link_preview_options"].url is None
+        assert call.args == message.answer.await_args_list[0].args
+        assert call.kwargs["reply_markup"] == message.answer.await_args_list[0].kwargs["reply_markup"]
     message.delete.assert_awaited_once()
     with session_scope() as session:
         assert session.query(CardEntry).count() == 1
