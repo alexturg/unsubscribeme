@@ -486,7 +486,7 @@ def _format_feed_list_line(feed: Feed) -> str:
     safe_mode = html_escape(feed.mode, quote=False)
     safe_type = html_escape(feed.type or "unknown", quote=False)
     time_part = (
-        f" в {html_escape(feed.digest_time_local, quote=False)}"
+        f" в <code>{html_escape(feed.digest_time_local, quote=False)}</code>"
         if feed.digest_time_local
         else ""
     )
@@ -2267,7 +2267,8 @@ async def cmd_list(message: Message) -> None:
         lines = ["Ваши ленты:"]
         for f in feeds:
             lines.append(_format_feed_list_line(f))
-        await message.answer("\n".join(lines))
+        # A YouTube preview makes Telegram interpret HH:MM as video timestamps.
+        await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message(Command("remove"))
