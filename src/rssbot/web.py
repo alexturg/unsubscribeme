@@ -8,7 +8,7 @@ from html import escape
 from datetime import datetime, timezone
 
 from .config import Settings
-from .db import Feed, Session, User, Item, Delivery, FeedBaseline, FeedRule, session_scope
+from .db import Feed, Session, User, Item, Delivery, FeedBaseline, FeedRule, delete_feed_data, session_scope
 from .rules import Content, matches_rules
 from .rss import compute_available_at
 from .scheduler import BotScheduler
@@ -437,7 +437,6 @@ async def remove_feed(request: web.Request) -> web.Response:
     chat_id = int(chat_id_str)
     feed_id = int(feed_id_str)
     # Fully delete feed and related data
-    DEPS.scheduler.unschedule_feed_poll(feed_id)
     with session_scope() as s:
         feed = s.get(Feed, feed_id)
         if not feed:
@@ -445,15 +444,8 @@ async def remove_feed(request: web.Request) -> web.Response:
         user = s.get(User, feed.user_id)
         if not user or user.chat_id != chat_id:
             raise web.HTTPForbidden(text="Forbidden")
-        # Remove rules and baseline
-        if feed.rules is not None:
-            s.delete(feed.rules)
-        s.query(FeedBaseline).filter(FeedBaseline.feed_id == feed.id).delete(synchronize_session=False)
-        # Remove deliveries and items
-        s.query(Delivery).filter(Delivery.feed_id == feed.id).delete(synchronize_session=False)
-        s.query(Item).filter(Item.feed_id == feed.id).delete(synchronize_session=False)
-        # Finally remove feed
-        s.delete(feed)
+        delete_feed_data(s, feed_id)
+    DEPS.scheduler.unschedule_feed_poll(feed_id)
     raise web.HTTPFound(location=f"/u/{chat_id}")
 
 

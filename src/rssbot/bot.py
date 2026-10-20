@@ -27,7 +27,7 @@ from aiogram.types import (
 
 from .config import Settings
 from .db import Delivery, Feed, FeedBaseline, FeedRule, Item, Session, User, session_scope
-from .db import CardEntry, CardMessage
+from .db import CardEntry, CardMessage, delete_feed_data
 from .cards import (
     advance_someday_view,
     choice_keyboard,
@@ -2268,10 +2268,8 @@ async def cmd_remove(message: Message) -> None:
         if not feed or feed.user_id != user_id:
             await message.answer("Лента не найдена.")
             return
-        # Unschedule polling
-        DEPS.scheduler.unschedule_feed_poll(feed_id)
-        # Delete feed (cascade will handle related items/deliveries/rules)
-        s.delete(feed)
+        delete_feed_data(s, feed_id)
+    DEPS.scheduler.unschedule_feed_poll(feed_id)
     await message.answer(f"Лента {feed_id} удалена.")
 
 

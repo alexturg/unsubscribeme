@@ -202,6 +202,20 @@ _SessionLocal: Optional[sessionmaker[Session]] = None
 _engine: Optional[Engine] = None
 
 
+def delete_feed_data(session: Session, feed_id: int) -> None:
+    """Delete subscription data explicitly; these foreign keys have no cascade.
+
+    Saved cards are independent of subscriptions and remain available in Someday.
+    """
+    item_ids = session.query(Item.id).filter(Item.feed_id == feed_id)
+    session.query(Delivery).filter(
+        (Delivery.feed_id == feed_id) | Delivery.item_id.in_(item_ids)
+    ).delete(synchronize_session=False)
+    for model in (FeedRule, FeedBaseline, IcsContentState, Item):
+        session.query(model).filter(model.feed_id == feed_id).delete(synchronize_session=False)
+    session.query(Feed).filter(Feed.id == feed_id).delete(synchronize_session="fetch")
+
+
 def init_engine(db_path: Path) -> Engine:
     global _engine, _SessionLocal
     # Ensure directory exists
