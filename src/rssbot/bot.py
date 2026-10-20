@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import hashlib
+from functools import wraps
 from html import escape as html_escape
 import json
 import logging
@@ -113,6 +114,20 @@ def _ensure_user_id(message: Message) -> Optional[int]:
         s.add(user)
         s.flush()
         return user.id
+
+
+def _delete_management_command(handler):
+    """Remove the user's command after its handler finishes and replies."""
+    @wraps(handler)
+    async def wrapped(message: Message, *args, **kwargs):
+        result = await handler(message, *args, **kwargs)
+        try:
+            await message.delete()
+        except Exception as exc:
+            logging.debug("Could not delete management command %s: %s", handler.__name__, exc)
+        return result
+
+    return wrapped
 
 
 @router.message(Command("start"))
@@ -1808,6 +1823,7 @@ async def cb_subscribe_card(callback: CallbackQuery) -> None:
 
 
 @router.message(Command("youtube"))
+@_delete_management_command
 async def cmd_youtube(message: Message) -> None:
     """Добавить ленту YouTube по ссылке на канал.
     
@@ -1888,6 +1904,7 @@ async def cmd_youtube(message: Message) -> None:
 
 
 @router.message(Command("channel"))
+@_delete_management_command
 async def cmd_channel(message: Message) -> None:
     """Добавить ленту YouTube по channel_id.
 
@@ -1928,6 +1945,7 @@ async def cmd_channel(message: Message) -> None:
 
 
 @router.message(Command("playlist"))
+@_delete_management_command
 async def cmd_playlist(message: Message) -> None:
     """Добавить ленту YouTube по playlist_id.
 
@@ -1968,6 +1986,7 @@ async def cmd_playlist(message: Message) -> None:
 
 
 @router.message(Command("addfeed"))
+@_delete_management_command
 async def cmd_addfeed(message: Message) -> None:
     """Добавить ленту по URL.
 
@@ -2007,6 +2026,7 @@ async def cmd_addfeed(message: Message) -> None:
 
 
 @router.message(Command("addeventsource"))
+@_delete_management_command
 async def cmd_addeventsource(message: Message) -> None:
     """Добавить источник событий (JSON или ICS).
 
@@ -2053,6 +2073,7 @@ async def cmd_addeventsource(message: Message) -> None:
 
 
 @router.message(Command("addics"))
+@_delete_management_command
 async def cmd_addics(message: Message) -> None:
     """Добавить источник событий в формате ICS.
 
@@ -2082,6 +2103,7 @@ async def cmd_addics(message: Message) -> None:
 
 
 @router.message(Command("addevents"))
+@_delete_management_command
 async def cmd_addevents(message: Message) -> None:
     """Массовое добавление событий прямо из текста в Telegram.
 
@@ -2228,6 +2250,7 @@ async def cmd_addevents(message: Message) -> None:
 
 
 @router.message(Command("list"))
+@_delete_management_command
 async def cmd_list(message: Message) -> None:
     """Показать список лент пользователя."""
     user_id = _ensure_user_id(message)
@@ -2248,6 +2271,7 @@ async def cmd_list(message: Message) -> None:
 
 
 @router.message(Command("remove"))
+@_delete_management_command
 async def cmd_remove(message: Message) -> None:
     """Удалить ленту."""
     user_id = _ensure_user_id(message)
@@ -2274,6 +2298,7 @@ async def cmd_remove(message: Message) -> None:
 
 
 @router.message(Command("setmode"))
+@_delete_management_command
 async def cmd_setmode(message: Message) -> None:
     user_id = _ensure_user_id(message)
     if not user_id:
@@ -2389,6 +2414,7 @@ async def cmd_setmode(message: Message) -> None:
 
 
 @router.message(Command("setfilter"))
+@_delete_management_command
 async def cmd_setfilter(message: Message) -> None:
     """Установить фильтры для ленты.
 
@@ -2509,6 +2535,7 @@ async def cmd_digest(message: Message) -> None:
 
 
 @router.message(Command("mute"))
+@_delete_management_command
 async def cmd_mute(message: Message) -> None:
     """Отключить ленту (временно)."""
     user_id = _ensure_user_id(message)
@@ -2536,6 +2563,7 @@ async def cmd_mute(message: Message) -> None:
 
 
 @router.message(Command("unmute"))
+@_delete_management_command
 async def cmd_unmute(message: Message) -> None:
     """Включить ленту."""
     user_id = _ensure_user_id(message)
