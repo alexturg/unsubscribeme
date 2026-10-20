@@ -58,6 +58,10 @@ def test_plain_youtube_link_becomes_card_and_deletes_original(tmp_path, monkeypa
     text = message.answer.await_args.args[0]
     markup = message.answer.await_args.kwargs["reply_markup"]
     assert '<a href="https://youtu.be/dQw4w9WgXcQ">Page &lt;Title&gt; &amp; more</a>' in text
+    preview = message.answer.await_args.kwargs["link_preview_options"]
+    assert preview.is_disabled is False
+    assert preview.url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    assert preview.prefer_large_media is True
     assert [button.text for button in markup.inline_keyboard[0]] == ["Сделать /ai"]
     assert [button.text for button in markup.inline_keyboard[1]] == ["✓", "Skip", "Someday"]
     with session_scope() as session:
@@ -77,6 +81,22 @@ def test_plain_web_link_has_ai_button_and_linked_title(tmp_path, monkeypatch):
     assert [button.text for button in markup.inline_keyboard[0]] == ["Сделать /ai"]
     assert "&amp;" in message.answer.await_args.args[0]
     message.delete.assert_awaited_once()
+
+
+@pytest.mark.parametrize("url", [
+    "https://youtu.be/y7d0SUg6mhY?si=JYnAODcWVDS03JeB",
+    "https://www.youtube.com/watch?v=y7d0SUg6mhY&feature=share",
+    "https://www.youtube.com/shorts/y7d0SUg6mhY",
+])
+def test_video_card_preview_uses_canonical_url(tmp_path, monkeypatch, url):
+    _setup(tmp_path, monkeypatch)
+    message = _message(url)
+    asyncio.run(bot.cmd_plain_link(message))
+    preview = message.answer.await_args.kwargs["link_preview_options"]
+    assert preview.url == "https://www.youtube.com/watch?v=y7d0SUg6mhY"
+    assert preview.is_disabled is False
+    with session_scope() as session:
+        assert session.query(CardEntry).one().link == url
 
 
 def test_video_duration_is_shown_and_saved_for_someday(tmp_path, monkeypatch):

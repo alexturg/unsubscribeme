@@ -5,10 +5,32 @@ from html import escape as html_escape
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from sqlalchemy import and_, or_
 
 from .db import CardEntry, CardMessage, Feed, Item, SomedayView, User, session_scope
+from .youtube_transcribe import extract_video_id
+
+
+def video_preview_options(link: str) -> LinkPreviewOptions | None:
+    """Request the video's preview explicitly, even when its URL is hidden in a title."""
+    try:
+        parsed = urlparse(link)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return None
+        if host not in {"youtu.be", "www.youtu.be", "youtube.com", "youtube-nocookie.com"} and not host.endswith(
+            (".youtube.com", ".youtube-nocookie.com")
+        ):
+            return None
+        video_id = extract_video_id(link)
+    except ValueError:
+        return None
+    return LinkPreviewOptions(
+        is_disabled=False,
+        url=f"https://www.youtube.com/watch?v={video_id}",
+        prefer_large_media=True,
+    )
 
 
 def linked_title(title: str, link: str, duration_sec: int | None = None) -> str:

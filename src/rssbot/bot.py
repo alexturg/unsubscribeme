@@ -40,6 +40,7 @@ from .cards import (
     linked_title,
     register_card_message,
     start_someday_view,
+    video_preview_options,
 )
 from .scheduler import BotScheduler, is_digest_source
 from .digest_schedule import digest_day_label, parse_digest_day
@@ -2621,6 +2622,7 @@ async def cmd_plain_link(message: Message) -> None:
         sent = await message.answer(
             f"Ссылка: {linked_title(title, link, duration_sec)}",
             reply_markup=choice_keyboard(card_id, [row] + _subscription_rows(card_id)),
+            link_preview_options=video_preview_options(link),
         )
     except Exception as exc:
         logging.warning("Could not create link card for chat_id=%s: %s", message.chat.id, exc)
