@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.types import (
     BufferedInputFile,
@@ -2618,12 +2619,22 @@ async def cmd_plain_link(message: Message) -> None:
         duration_sec=duration_sec,
     )
     row = [InlineKeyboardButton(text="Сделать /ai", callback_data=f"ai:link:{card_id}")]
+    text = f"Ссылка: {linked_title(title, link, duration_sec)}"
+    markup = choice_keyboard(card_id, [row] + _subscription_rows(card_id))
+    preview = video_preview_options(link)
     try:
-        sent = await message.answer(
-            f"Ссылка: {linked_title(title, link, duration_sec)}",
-            reply_markup=choice_keyboard(card_id, [row] + _subscription_rows(card_id)),
-            link_preview_options=video_preview_options(link),
-        )
+        for attempt in range(3):
+            try:
+                sent = await message.answer(text, reply_markup=markup, link_preview_options=preview)
+                break
+            except TelegramRetryAfter as exc:
+                if attempt == 2:
+                    raise
+                logging.info(
+                    "Telegram delayed link card for chat_id=%s; retrying in %s seconds",
+                    message.chat.id, exc.retry_after,
+                )
+                await asyncio.sleep(exc.retry_after)
     except Exception as exc:
         logging.warning("Could not create link card for chat_id=%s: %s", message.chat.id, exc)
         return

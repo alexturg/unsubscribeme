@@ -6,6 +6,8 @@ from urllib.parse import parse_qs, urlparse
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from aiogram.exceptions import TelegramRetryAfter
+from aiogram.methods import SendMessage
 
 from rssbot import bot
 from rssbot import ai_summarizer
@@ -121,6 +123,49 @@ def test_non_link_or_failed_send_keeps_original(tmp_path, monkeypatch):
     failed = _message("https://example.com", send_fails=True)
     asyncio.run(bot.cmd_plain_link(failed))
     failed.delete.assert_not_awaited()
+
+
+@pytest.mark.parametrize("rate_limits", [1, 2])
+def test_link_card_retries_after_telegram_rate_limit(tmp_path, monkeypatch, rate_limits):
+    _setup(tmp_path, monkeypatch)
+    sleep = AsyncMock()
+    monkeypatch.setattr(bot.asyncio, "sleep", sleep)
+    message = _message("https://youtu.be/y7d0SUg6mhY")
+
+    async def delayed_answer(*_a, **_k):
+        if message.answer.await_count <= rate_limits:
+            message.delete.assert_not_awaited()
+            raise TelegramRetryAfter(
+                method=SendMessage(chat_id=77, text="card"), message="Flood control", retry_after=8,
+            )
+        return SimpleNamespace(message_id=200)
+
+    message.answer.side_effect = delayed_answer
+    asyncio.run(bot.cmd_plain_link(message))
+    assert message.answer.await_count == rate_limits + 1
+    assert sleep.await_count == rate_limits
+    sleep.assert_awaited_with(8)
+    assert all(call == message.answer.await_args_list[0] for call in message.answer.await_args_list)
+    message.delete.assert_awaited_once()
+    with session_scope() as session:
+        assert session.query(CardEntry).count() == 1
+        assert session.query(CardMessage).one().message_id == 200
+
+
+def test_persistent_rate_limit_is_bounded_and_keeps_original(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    sleep = AsyncMock()
+    monkeypatch.setattr(bot.asyncio, "sleep", sleep)
+    message = _message("https://youtu.be/y7d0SUg6mhY")
+    message.answer.side_effect = TelegramRetryAfter(
+        method=SendMessage(chat_id=77, text="card"), message="Flood control", retry_after=8,
+    )
+    asyncio.run(bot.cmd_plain_link(message))
+    assert message.answer.await_count == 3
+    assert sleep.await_count == 2
+    message.delete.assert_not_awaited()
+    with session_scope() as session:
+        assert session.query(CardMessage).count() == 0
 
 
 def test_ai_button_uses_saved_link_for_its_owner(tmp_path, monkeypatch):
