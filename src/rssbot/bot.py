@@ -2261,9 +2261,13 @@ async def cmd_list(message: Message) -> None:
         return
     with session_scope() as s:
         feeds = s.query(Feed).filter(Feed.user_id == user_id).order_by(Feed.id.asc()).all()
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Закрыть", callback_data="list:close")]
+        ])
         if not feeds:
             await message.answer(
-                "У вас нет лент. Используйте /addfeed, /channel, /playlist, /addeventsource или /addics."
+                "У вас нет лент. Используйте /addfeed, /channel, /playlist, /addeventsource или /addics.",
+                reply_markup=markup,
             )
             return
         lines = []
@@ -2275,7 +2279,25 @@ async def cmd_list(message: Message) -> None:
                 lines.append(heading)
                 lines.extend(section)
         # A YouTube preview makes Telegram interpret HH:MM as video timestamps.
-        await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
+        await message.answer(
+            "\n".join(lines), parse_mode="HTML", disable_web_page_preview=True,
+            reply_markup=markup,
+        )
+
+
+@router.callback_query(F.data == "list:close")
+async def cb_list_close(callback: CallbackQuery) -> None:
+    message = callback.message
+    if message is None or not _is_allowed(message.chat.id):
+        await callback.answer("Доступ запрещён.", show_alert=True)
+        return
+    try:
+        await message.delete()
+    except Exception as exc:
+        logging.debug("Could not close /list message: %s", exc)
+        await callback.answer("Не удалось удалить сообщение.", show_alert=True)
+    else:
+        await callback.answer()
 
 
 @router.message(Command("remove"))
