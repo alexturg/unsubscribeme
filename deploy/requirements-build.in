@@ -1,0 +1,2 @@
+# Build backend must also be installed from the hash-locked environment.
+hatchling>=1.18.0

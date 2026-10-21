@@ -1,0 +1,2 @@
+# Install as /etc/sudoers.d/unsubscribeme-deploy, root:root 0440.
+unsubscribeme-deploy ALL=(root) NOPASSWD: /usr/local/sbin/unsubscribeme-service stop, /usr/local/sbin/unsubscribeme-service start, /usr/local/sbin/unsubscribeme-service snapshot

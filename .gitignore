@@ -216,3 +216,4 @@ data/bot.sqlite
 data/bot.sqlite-shm
 data/bot.sqlite-wal
 data/ai_summaries/web_cache/
+deploy/deploy-key.pub

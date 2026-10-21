@@ -64,6 +64,16 @@ async def app() -> None:
 
     # Start web UI
     web_app = webui.create_app(settings, scheduler)
+
+    async def mark_ready() -> None:
+        await bot.get_me()
+        web_app[webui.READY_KEY] = True
+
+    async def mark_stopping() -> None:
+        web_app[webui.READY_KEY] = False
+
+    dp.startup.register(mark_ready)
+    dp.shutdown.register(mark_stopping)
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, host=settings.WEB_HOST, port=settings.WEB_PORT)

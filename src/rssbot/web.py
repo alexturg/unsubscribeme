@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Optional
 
 from aiohttp import web
+from sqlalchemy import text
 from html import escape
 from datetime import datetime, timezone
 
@@ -527,9 +529,26 @@ async def clear_rules(request: web.Request) -> web.Response:
     raise web.HTTPFound(location=f"/u/{chat_id}")
 
 
+READY_KEY = web.AppKey("ready", bool)
+
+
+async def health(request: web.Request) -> web.Response:
+    """Readiness for local deployment checks; never expose credentials."""
+    if not request.app[READY_KEY]:
+        return web.json_response({"ready": False}, status=503)
+    try:
+        with session_scope() as session:
+            session.execute(text("SELECT 1"))
+    except Exception:
+        return web.json_response({"ready": False}, status=503)
+    return web.json_response({"ready": True, "pid": os.getpid()})
+
+
 def create_app(settings: Settings, scheduler: BotScheduler) -> web.Application:
     set_deps(settings, scheduler)
     app = web.Application()
+    app[READY_KEY] = False
+    app.router.add_get("/healthz", health)
     app.router.add_get("/", index)
     app.router.add_get("/u/{chat_id}", user_page)
     app.router.add_post("/u/{chat_id}/add", add_feed)
