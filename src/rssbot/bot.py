@@ -2266,9 +2266,14 @@ async def cmd_list(message: Message) -> None:
                 "У вас нет лент. Используйте /addfeed, /channel, /playlist, /addeventsource или /addics."
             )
             return
-        lines = ["Ваши ленты:"]
-        for f in feeds:
-            lines.append(_format_feed_list_line(f))
+        lines = []
+        for enabled, heading in ((True, "Включённые ленты:"), (False, "Выключенные ленты:")):
+            section = [_format_feed_list_line(f) for f in feeds if f.enabled == enabled]
+            if section:
+                if lines:
+                    lines.append("")
+                lines.append(heading)
+                lines.extend(section)
         # A YouTube preview makes Telegram interpret HH:MM as video timestamps.
         await message.answer("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True)
 
