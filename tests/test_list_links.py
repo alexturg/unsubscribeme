@@ -3,7 +3,7 @@ from rssbot.db import Feed
 import pytest
 
 
-@pytest.mark.parametrize("statuses", [(False, True, False, True), (True,), (False,)])
+@pytest.mark.parametrize("statuses", [(False, True, False, True), (True,), (False,), ()])
 def test_list_groups_enabled_feeds_before_disabled(tmp_path, monkeypatch, statuses):
     import asyncio
     from types import SimpleNamespace
@@ -35,7 +35,39 @@ def test_list_groups_enabled_feeds_before_disabled(tmp_path, monkeypatch, status
     for enabled, heading in ((True, "Включённые ленты:"), (False, "Выключенные ленты:")):
         if expected_sections[enabled]:
             sections.append("\n".join([heading, *expected_sections[enabled]]))
-    assert message.answer.await_args.args[0] == "\n\n".join(sections)
+    if statuses:
+        assert message.answer.await_args.args[0] == "\n\n".join(sections)
+    else:
+        assert message.answer.await_args.args[0].startswith("У вас нет лент.")
+    button = message.answer.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
+    assert button.text == "Закрыть"
+    assert button.callback_data == "list:close"
+
+
+@pytest.mark.parametrize("allowed,delete_fails", [(True, False), (True, True), (False, False)])
+def test_list_close_handles_deletion_and_access(monkeypatch, allowed, delete_fails):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from rssbot import bot
+
+    monkeypatch.setattr(bot, "_is_allowed", lambda _chat_id: allowed)
+    message = SimpleNamespace(
+        chat=SimpleNamespace(id=77),
+        delete=AsyncMock(side_effect=RuntimeError("delete failed") if delete_fails else None),
+    )
+    callback = SimpleNamespace(message=message, data="list:close", answer=AsyncMock())
+    asyncio.run(bot.cb_list_close(callback))
+    if not allowed:
+        message.delete.assert_not_awaited()
+        callback.answer.assert_awaited_once_with("Доступ запрещён.", show_alert=True)
+    elif delete_fails:
+        message.delete.assert_awaited_once()
+        callback.answer.assert_awaited_once_with("Не удалось удалить сообщение.", show_alert=True)
+    else:
+        message.delete.assert_awaited_once()
+        callback.answer.assert_awaited_once_with()
 
 
 def test_resolve_feed_display_url_for_channel():
