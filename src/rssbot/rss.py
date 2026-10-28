@@ -9,11 +9,11 @@ from typing import Any, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 import re
 
-import aiohttp
 import feedparser
 
 from .db import Feed, IcsContentState, Item, session_scope
 from .config import Settings
+from .source_http import fetch_source
 
 
 def _extract_video_id(entry: feedparser.FeedParserDict) -> Optional[str]:
@@ -321,13 +321,12 @@ async def fetch_feed_http(feed: Feed) -> Tuple[int, Optional[str], Optional[str]
     if feed.http_last_modified:
         headers["If-Modified-Since"] = feed.http_last_modified
 
-    timeout = aiohttp.ClientTimeout(total=20)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(feed.url, headers=headers) as resp:
-            if resp.status == 304:
-                return 304, resp.headers.get("ETag"), resp.headers.get("Last-Modified"), None
-            content = await resp.read()
-            return resp.status, resp.headers.get("ETag"), resp.headers.get("Last-Modified"), content
+    settings = Settings()
+    return await fetch_source(
+        feed.url, headers=headers, max_bytes=settings.SOURCE_MAX_RESPONSE_BYTES,
+        timeout_seconds=settings.SOURCE_FETCH_TIMEOUT_SEC,
+        allowed_private_hosts=settings.SOURCE_ALLOWED_PRIVATE_HOSTS,
+    )
 
 
 async def fetch_and_store_event_source(feed_id: int) -> List[int]:

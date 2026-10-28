@@ -7,21 +7,29 @@ name = "unsubscribeme"
 version = "0.1.0"
 description = "Telegram bot to fetch and filter YouTube RSS with immediate, digest, and on-demand delivery modes."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [
   { name = "UnsubscribeMe", email = "devnull@example.com" }
 ]
 dependencies = [
-  "aiogram>=3.2.0",
-  "aiohttp>=3.9.0",
+  "aiogram>=3.31.0,<4",
+  "aiohttp>=3.14.4,<4",
   "feedparser>=6.0.10",
   "SQLAlchemy>=2.0.20",
   "APScheduler>=3.10.4",
   "pydantic>=2.6.0",
   "pydantic-settings>=2.2.1",
   "youtube-transcript-api>=0.6.2",
-  "openai>=1.40.0",
-  "yt-dlp>=2025.1.26",
+  "openai>=1.40.0,<3",
+  "yt-dlp>=2026.7.4",
+  # Security floors also apply when installing outside the production lock file.
+  "anyio>=4.14.2",
+  "certifi>=2026.10.19",
+  "urllib3>=2.8.0",
+  "idna>=3.15",
+  "multidict>=6.9.1,<7",
+  "requests>=2.33.0",
+  "python-dotenv>=1.2.2",
 ]
 
 [project.scripts]
