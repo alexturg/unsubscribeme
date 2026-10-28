@@ -81,7 +81,7 @@ async def app() -> None:
 
     # Run bot
     try:
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, tasks_concurrency_limit=16)
     finally:
         await runner.cleanup()
 

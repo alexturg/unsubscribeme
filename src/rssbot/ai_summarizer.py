@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import Settings
+from .resource_limits import bounded_work
 from .web_summarize import WebSummarizationError, fetch_webpage_content
 from .youtube_context import VideoContext, VideoContextError, fetch_video_context
 from .youtube_summarize import SummarizationError, summarize_text, summarize_text_with_openai
@@ -278,6 +279,7 @@ def _summarize_youtube_context_fallback(
     )
 
 
+@bounded_work(AiSummarizerError)
 def _summarize_sync(
     settings: Settings,
     *,
@@ -326,6 +328,7 @@ def _summarize_sync(
     )
 
 
+@bounded_work(AiSummarizerError)
 def _summarize_sync_with_whisper(
     settings: Settings,
     *,
@@ -382,6 +385,7 @@ def _web_openai_input_word_budget(settings: Settings) -> int:
     return web_budget
 
 
+@bounded_work(AiSummarizerError)
 def _summarize_web_sync(
     settings: Settings,
     *,

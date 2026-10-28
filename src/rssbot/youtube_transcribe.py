@@ -4,7 +4,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 import json
 import logging
+import os
 import re
+import signal
 import subprocess
 import tempfile
 import threading
@@ -13,6 +15,8 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 from urllib.parse import parse_qs, urlparse
 from typing import Callable, Iterable, Optional, TypeVar
+
+from .resource_limits import bounded_work
 
 VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
 WHITESPACE_RE = re.compile(r"\s+")
@@ -28,6 +32,8 @@ TRANSCRIPT_MISSING_MARKERS = (
     "no transcript",
 )
 PROXY_LIST_MAX_BYTES = 1_200_000
+MAX_MEDIA_DOWNLOAD_BYTES = 128 * 1024 * 1024
+MAX_MEDIA_WORK_BYTES = 256 * 1024 * 1024
 
 logger = logging.getLogger(__name__)
 _Result = TypeVar("_Result")
@@ -175,6 +181,7 @@ def _as_int(value: object) -> int | None:
     return result if result >= 0 else None
 
 
+@bounded_work(YouTubeMediaError)
 def fetch_video_info(
     video_url_or_id: str,
     *,
@@ -185,6 +192,7 @@ def fetch_video_info(
     watch_url = f"https://www.youtube.com/watch?v={video_id}"
     cmd = [
         yt_dlp_binary,
+        "--ignore-config",
         "--skip-download",
         "--no-playlist",
         "--quiet",
@@ -656,20 +664,65 @@ def _normalize_space(text: str) -> str:
     return WHITESPACE_RE.sub(" ", (text or "")).strip()
 
 
+def _work_directory_size(directory: Path) -> int:
+    total = 0
+    for path in directory.rglob("*"):
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+        except FileNotFoundError:
+            # yt-dlp/ffmpeg rename intermediate files while the monitor runs.
+            continue
+    return total
+
+
 def _run_subprocess_checked(
     cmd: list[str],
     *,
     timeout_sec: int,
     fail_message: str,
+    work_dir: Path | None = None,
 ) -> None:
     try:
-        proc = subprocess.run(
-            cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-        )
+        # Keep diagnostics off the heap and stop ffmpeg/yt-dlp children as well.
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            proc = subprocess.Popen(
+                cmd, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                start_new_session=True, cwd=work_dir,
+            )
+            try:
+                deadline = time.monotonic() + timeout_sec
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(cmd, timeout_sec)
+                    if work_dir is not None:
+                        total = _work_directory_size(work_dir)
+                        if total > MAX_MEDIA_WORK_BYTES:
+                            raise WhisperTranscriptionError(f"{fail_message}: превышен лимит временных файлов.")
+                    if stdout.tell() + stderr.tell() > 1_000_000:
+                        raise WhisperTranscriptionError(f"{fail_message}: слишком большой вывод команды.")
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.1)
+            except BaseException:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    # Some kernels deny signalling a group whose leader has
+                    # already exited. Never mask the original limit error.
+                    if proc.poll() is None:
+                        proc.kill()
+                proc.wait()
+                raise
+            if proc.returncode != 0:
+                stderr.seek(0)
+                details = _normalize_space(stderr.read(1200).decode("utf-8", errors="replace"))[:300]
+                raise WhisperTranscriptionError(
+                    f"{fail_message}: команда завершилась с ошибкой."
+                    + (f" Детали: {details}" if details else "")
+                )
     except FileNotFoundError as exc:
         binary = cmd[0] if cmd else "command"
         raise WhisperTranscriptionError(f"{fail_message}: не найден бинарник {binary}.") from exc
@@ -677,15 +730,10 @@ def _run_subprocess_checked(
         raise WhisperTranscriptionError(
             f"{fail_message}: таймаут выполнения команды ({timeout_sec} сек)."
         ) from exc
+    except WhisperTranscriptionError:
+        raise
     except Exception as exc:
         raise WhisperTranscriptionError(f"{fail_message}: {exc}") from exc
-
-    if proc.returncode != 0:
-        details = _normalize_space(proc.stderr or proc.stdout or "")[:300]
-        raise WhisperTranscriptionError(
-            f"{fail_message}: команда завершилась с ошибкой."
-            + (f" Детали: {details}" if details else "")
-        )
 
 
 def _download_audio_for_whisper(
@@ -698,6 +746,9 @@ def _download_audio_for_whisper(
     output_template = str((work_dir / "audio.%(ext)s").resolve())
     cmd = [
         yt_dlp_binary,
+        "--ignore-config",
+        "--max-filesize", str(MAX_MEDIA_DOWNLOAD_BYTES),
+        "--downloader", "dash,m3u8:native",
         "--no-playlist",
         "--quiet",
         "--no-warnings",
@@ -715,6 +766,7 @@ def _download_audio_for_whisper(
         cmd,
         timeout_sec=timeout_sec,
         fail_message="Whisper fallback: не удалось скачать аудио через yt-dlp",
+        work_dir=work_dir,
     )
 
     candidates = sorted(work_dir.glob("audio.*"))
@@ -727,6 +779,7 @@ def _download_audio_for_whisper(
     return audio_candidates[0]
 
 
+@bounded_work(YouTubeMediaError)
 def download_audio_for_export(
     video_url_or_id: str,
     *,
@@ -741,6 +794,9 @@ def download_audio_for_export(
     output_template = str((output_dir / f"{video_id}.%(ext)s").resolve())
     cmd = [
         yt_dlp_binary,
+        "--ignore-config",
+        "--max-filesize", str(MAX_MEDIA_DOWNLOAD_BYTES),
+        "--downloader", "dash,m3u8:native",
         "--no-playlist",
         "--quiet",
         "--no-warnings",
@@ -758,6 +814,7 @@ def download_audio_for_export(
             cmd,
             timeout_sec=max(10, timeout_sec),
             fail_message="Audio export failed: yt-dlp download error",
+            work_dir=output_dir,
         )
     except WhisperTranscriptionError as exc:
         raise YouTubeMediaError(str(exc)) from exc
@@ -797,6 +854,7 @@ def _transcode_audio_for_whisper(
         cmd,
         timeout_sec=timeout_sec,
         fail_message="Whisper fallback: не удалось подготовить аудио через ffmpeg",
+        work_dir=output_audio.parent,
     )
     if not output_audio.exists():
         raise WhisperTranscriptionError(
@@ -837,6 +895,7 @@ def _split_audio_for_whisper(
         cmd,
         timeout_sec=timeout_sec,
         fail_message="Whisper fallback: не удалось разбить аудио на части",
+        work_dir=work_dir,
     )
 
     parts = sorted(work_dir.glob(f"{source_audio.stem}_part_*{suffix}"))
@@ -861,6 +920,7 @@ def _is_payload_too_large_error(exc: Exception) -> bool:
     return "413" in message and "maximum content size limit" in message
 
 
+@bounded_work(WhisperTranscriptionError)
 def transcribe_video_with_whisper(
     video_url_or_id: str,
     *,

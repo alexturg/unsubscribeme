@@ -1,2 +1,7 @@
 # Build backend must also be installed from the hash-locked environment.
 hatchling>=1.18.0
+# Upgrade the tools created by Ubuntu's venv as part of every release.
+pip>=25.3
+setuptools>=78.1.1
+# SQLAlchemy requires this on Linux/x86_64; retain it in cross-platform locks too.
+greenlet>=3.2.4

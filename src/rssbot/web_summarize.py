@@ -19,6 +19,11 @@ import urllib.request
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
 
+import idna
+
+from .public_http import PublicHTTPHandler, PublicHTTPSHandler
+from .resource_limits import bounded_work
+
 
 SPACE_RE = re.compile(r"\s+")
 WORD_RE = re.compile(r"\b[\w'-]+\b", flags=re.UNICODE)
@@ -515,7 +520,10 @@ def normalize_web_url(raw_url: str) -> str:
         raise WebSummarizationError("Порт URL вне допустимого диапазона.")
 
     try:
-        ascii_host = parsed.hostname.encode("idna").decode("ascii")
+        # Keep numeric IPv6 intact; use IDNA 2008 for domain names.
+        ascii_host = parsed.hostname if ":" in parsed.hostname else idna.encode(
+            parsed.hostname, uts46=True, std3_rules=True,
+        ).decode("ascii")
     except UnicodeError as exc:
         raise WebSummarizationError("Некорректный host в URL.") from exc
 
@@ -848,6 +856,7 @@ def _open_web_request(opener, request: urllib.request.Request, timeout_sec: int)
         return opener.open(request, timeout=timeout_sec)
 
 
+@bounded_work(WebSummarizationError)
 @_serialize_reddit_fetch
 def fetch_webpage_content(
     raw_url: str,
@@ -868,7 +877,10 @@ def fetch_webpage_content(
 
     current_url = validate_web_url_for_fetch(raw_url)
     original_cache_key = _reddit_content_cache_key(current_url, max_bytes, max_words, user_agent)
-    opener = urllib.request.build_opener(_NoRedirectHandler())
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), PublicHTTPHandler(), PublicHTTPSHandler(),
+        _NoRedirectHandler(),
+    )
     request_headers = {
         "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.1",
         "Accept-Encoding": "identity",

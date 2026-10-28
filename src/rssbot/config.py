@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     # Hide videos whose availability time is in the future
     HIDE_FUTURE_VIDEOS: bool = Field(default=False)
 
+    SOURCE_MAX_RESPONSE_BYTES: int = Field(default=2_000_000, ge=1024, le=20_000_000)
+    SOURCE_FETCH_TIMEOUT_SEC: int = Field(default=20, ge=1, le=120)
+    SOURCE_ALLOWED_PRIVATE_HOSTS: str = Field(
+        default="",
+        description="Explicit comma-separated RSS/ICS hostnames allowed to resolve to private LAN IPs",
+    )
+
     # Web UI host/port
     WEB_HOST: str = Field(default="127.0.0.1", description="Host for built-in web UI")
     WEB_PORT: int = Field(default=8080, description="Port for built-in web UI")
