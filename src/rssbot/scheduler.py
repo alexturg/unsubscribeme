@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from html import escape as html_escape
@@ -18,6 +19,9 @@ from .rss import compute_available_at, event_identity_hash, fetch_and_store_even
 from .config import Settings
 from .cards import choice_keyboard, ensure_item_card, linked_title, register_card_message
 from .youtube_context import video_duration_for_link
+
+logger = logging.getLogger(__name__)
+POLL_WORKERS = 4
 
 
 @dataclass
@@ -68,11 +72,36 @@ class BotScheduler:
 
     def start(self) -> None:
         self.scheduler.start()
+        self._poll_queue: asyncio.Queue[int] = asyncio.Queue()
+        self._pending_polls: set[int] = set()
+        self._poll_workers = [
+            asyncio.create_task(self._poll_worker()) for _ in range(POLL_WORKERS)
+        ]
         # Digest scanner runs every minute
         self.scheduler.add_job(self._digest_scan_tick, "cron", second=0, id="digest-scan")
 
-    def shutdown(self) -> None:
+    async def shutdown(self) -> None:
         self.scheduler.shutdown(wait=False)
+        for worker in self._poll_workers:
+            worker.cancel()
+        await asyncio.gather(*self._poll_workers, return_exceptions=True)
+
+    async def _enqueue_feed_poll(self, feed_id: int) -> None:
+        if feed_id not in self._pending_polls:
+            self._pending_polls.add(feed_id)
+            self._poll_queue.put_nowait(feed_id)
+
+    async def _poll_worker(self) -> None:
+        while True:
+            feed_id = await self._poll_queue.get()
+            try:
+                await self._poll_feed_job(feed_id)
+            except Exception as exc:
+                # Exception details can contain credentials from a feed URL.
+                logger.warning("Poll failed for feed %s (%s)", feed_id, type(exc).__name__)
+            finally:
+                self._pending_polls.discard(feed_id)
+                self._poll_queue.task_done()
 
     def schedule_feed_poll(self, feed_id: int, interval_min: int) -> None:
         job_id = f"poll:{feed_id}"
@@ -92,7 +121,7 @@ class BotScheduler:
             except Exception:
                 pass
         self.scheduler.add_job(
-            self._poll_feed_job,
+            self._enqueue_feed_poll,
             trigger="interval",
             minutes=poll_interval,
             id=job_id,
@@ -126,25 +155,14 @@ class BotScheduler:
             feed_type = (feed.type or "").strip().lower()
 
         if feed_type in {"event_json", "event_ics", "event_manual"}:
-            try:
-                if feed_type in {"event_json", "event_ics"}:
-                    await fetch_and_store_event_source(feed_id)
-                if feed_type != "event_ics":
-                    await self._deliver_due_event_starts(feed_id)
-            except Exception:
-                return
-            return
-
-        try:
-            new_ids = await fetch_and_store_feed(feed_id)
-        except Exception:
-            return
-
-        if not new_ids:
+            if feed_type in {"event_json", "event_ics"}:
+                await fetch_and_store_event_source(feed_id)
+            if feed_type != "event_ics":
+                await self._deliver_due_event_starts(feed_id)
             return
 
         # handle deliveries for immediate mode
-        for item_id in new_ids:
+        for item_id in await fetch_and_store_feed(feed_id):
             await self._maybe_deliver_immediate(item_id)
 
     async def _send_event_start_message(

@@ -11,6 +11,7 @@ from rssbot.rss import (
     _normalized_ics_event_rows,
     compute_available_at,
     fetch_and_store_event_source,
+    fetch_and_store_feed,
     fetch_and_store_latest_item,
 )
 
@@ -21,6 +22,37 @@ def test_extract_video_id_variants():
 
     entry2 = {"link": "https://www.youtube.com/watch?v=ABCDEF12345&feature=youtu.be"}
     assert _extract_video_id(entry2) == "ABCDEF12345"
+
+
+def test_fetch_and_store_feed_batches_existing_ids_and_keeps_first_entry(monkeypatch, tmp_path):
+    from rssbot import rss
+
+    init_engine(tmp_path / "bot.sqlite")
+    with session_scope() as s:
+        user = User(chat_id=123, tz="UTC")
+        s.add(user)
+        s.flush()
+        feed = Feed(user_id=user.id, url="https://example.com/rss", enabled=True, mode="digest")
+        s.add(feed)
+        s.flush()
+        feed_id = feed.id
+        s.add(Item(feed_id=feed_id, external_id="old", title="Stored"))
+
+    async def fetch(feed):
+        xml = b"""<rss version="2.0"><channel><title>Feed</title>
+          <item><guid>old</guid><title>Ignored</title></item>
+          <item><guid>new-1</guid><title>First</title></item>
+          <item><guid>new-1</guid><title>Duplicate</title></item>
+          <item><guid>new-2</guid><title>Second</title></item>
+        </channel></rss>"""
+        return 200, None, None, xml
+
+    monkeypatch.setattr(rss, "fetch_feed_http", fetch)
+    ids = asyncio.run(fetch_and_store_feed(feed_id))
+    with session_scope() as s:
+        assert [s.get(Item, item_id).title for item_id in ids] == ["First", "Second"]
+        assert s.query(Item).filter_by(feed_id=feed_id, external_id="old").one().title == "Stored"
+    assert asyncio.run(fetch_and_store_feed(feed_id)) == []
 
 
 def test_fetch_and_store_latest_item(monkeypatch, tmp_path):
