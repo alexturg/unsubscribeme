@@ -469,7 +469,6 @@ async def fetch_and_store_feed(feed_id: int) -> List[int]:
 
     status, etag, last_modified, content = await fetch_feed_http(feed)
 
-    new_ids: List[int] = []
     if status == 304:
         # no changes
         with session_scope() as s:
@@ -486,10 +485,16 @@ async def fetch_and_store_feed(feed_id: int) -> List[int]:
         return []
 
     parsed = feedparser.parse(content)
-    entries = parsed.get("entries", [])
+    entries_by_id = {}
+    for entry in parsed.get("entries", []):
+        vid = _extract_video_id(entry) or (entry.get("id") or "").strip()
+        if vid:
+            entries_by_id.setdefault(vid, entry)
 
     with session_scope() as s:
         f = s.get(Feed, feed_id)
+        if not f or not f.enabled:
+            return []
         f.http_etag = etag or f.http_etag
         f.http_last_modified = last_modified or f.http_last_modified
         f.last_poll_at = datetime.now(timezone.utc)
@@ -502,14 +507,18 @@ async def fetch_and_store_feed(feed_id: int) -> List[int]:
         except Exception:
             pass
 
-        for e in entries:
-            vid = _extract_video_id(e) or (e.get("id") or "").strip()
-            if not vid:
-                continue
-            exists = (
-                s.query(Item.id).filter(Item.feed_id == f.id, Item.external_id == vid).first()
+        known_ids = set()
+        entry_ids = list(entries_by_id)
+        # Keep each query below SQLite's parameter limit for large feeds.
+        for offset in range(0, len(entry_ids), 500):
+            known_ids.update(
+                vid for (vid,) in s.query(Item.external_id).filter(
+                    Item.feed_id == f.id, Item.external_id.in_(entry_ids[offset:offset + 500])
+                )
             )
-            if exists:
+        new_items = []
+        for vid, e in entries_by_id.items():
+            if vid in known_ids:
                 continue
             it = Item(
                 feed_id=f.id,
@@ -521,11 +530,10 @@ async def fetch_and_store_feed(feed_id: int) -> List[int]:
                 categories=[t.get("term") if isinstance(t, dict) else t for t in (e.get("tags") or [])],
                 summary_hash=_summary_hash(e),
             )
-            s.add(it)
-            s.flush()
-            new_ids.append(it.id)
-
-    return new_ids
+            new_items.append(it)
+        s.add_all(new_items)
+        s.flush()
+        return [item.id for item in new_items]
 
 
 async def fetch_and_store_latest_item(feed_id: int) -> Optional[int]:
