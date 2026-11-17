@@ -367,11 +367,14 @@ def test_ai_long_command_sends_a_single_overall_summary(monkeypatch):
     monkeypatch.setattr(bot_module, "_ensure_user_id", lambda _: 1)
     monkeypatch.setattr(bot_module, "DEPS", SimpleNamespace(settings=SimpleNamespace()))
     sent, send_text = _make_send_text()
+    progress_shown: asyncio.Event
 
     async def summarize(_settings, **kwargs):
         assert kwargs["long_summary"] is True
         assert kwargs["video_url"] == "https://youtu.be/y4rykwJv69k"
         assert kwargs["custom_prompt"] == "главные аргументы"
+        await asyncio.to_thread(kwargs["on_progress"], "Фрагменты 1/22")
+        await asyncio.wait_for(progress_shown.wait(), timeout=5)
         return AiSummaryResult(
             summary_text="Итог по всему интервью.",
             summary_path=None,
@@ -383,12 +386,25 @@ def test_ai_long_command_sends_a_single_overall_summary(monkeypatch):
     monkeypatch.setattr(bot_module, "summarize_video", summarize)
 
     async def answer(text, reply_markup=None):
-        return await send_text(text, reply_markup)
+        sent_message = await send_text(text, reply_markup)
+        if len(sent) == 1:
+            async def edit_text(text, **kwargs):
+                await DummyMessage.edit_text(sent_message, text, **kwargs)
+                progress_shown.set()
+
+            sent_message.edit_text = edit_text
+        return sent_message
 
     message = DummyMessage("/ai_long https://youtu.be/y4rykwJv69k главные аргументы")
     message.answer = answer
-    asyncio.run(bot_module.cmd_ai_long(message))
+    async def run_command():
+        nonlocal progress_shown
+        progress_shown = asyncio.Event()
+        await bot_module.cmd_ai_long(message)
+
+    asyncio.run(run_command())
 
     assert sent[0][2].deleted
+    assert "Фрагменты 1/22" in sent[0][2].edits[0][0]
     assert len(sent) == 2
     assert "Итог по всему интервью." in sent[1][0]

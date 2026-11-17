@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import groupby
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import Settings
 from .resource_limits import bounded_work
@@ -292,6 +292,8 @@ def _summarize_sync(
     video_url: str,
     custom_prompt: Optional[str],
     long_deadline: Optional[float] = None,
+    on_progress: Optional[Callable[[str], None]] = None,
+    trace_id: str = "-",
 ) -> _YouTubeSummarySyncResult:
     _require_supported_mode(settings)
     languages = _parse_languages(settings.AI_SUMMARIZER_LANGUAGES)
@@ -301,6 +303,8 @@ def _summarize_sync(
     target_language = _infer_instruction_language(custom_prompt)
     video_id = extract_video_id(video_url)
 
+    if on_progress:
+        on_progress("Получаю субтитры YouTube")
     try:
         segments = fetch_transcript(
             video_id=video_id,
@@ -308,13 +312,16 @@ def _summarize_sync(
             **transcript_options_from_settings(settings),
         )
     except TranscriptError as exc:
-        logging.warning("YouTube transcript fetch failed for video_id=%s: %s", video_id, exc)
+        if long_deadline is not None:
+            logging.warning("ai_long %s captions failed error_type=%s", trace_id, type(exc).__name__)
+        else:
+            logging.warning("YouTube transcript fetch failed for video_id=%s: %s", video_id, exc)
         if not _transcript_error_means_missing_subtitles(exc):
             raise
         if long_deadline is not None:
             return _summarize_sync_with_whisper(
                 settings, video_url=video_url, custom_prompt=custom_prompt,
-                long_deadline=long_deadline,
+                long_deadline=long_deadline, on_progress=on_progress, trace_id=trace_id,
             )
         return _summarize_youtube_context_fallback(
             settings,
@@ -325,6 +332,7 @@ def _summarize_sync(
 
     plain_transcript = " ".join(segment.text for segment in segments)
     if long_deadline is not None:
+        logging.info("ai_long %s captions ready segments=%d", trace_id, len(segments))
         sections = (
             " ".join(segment.text for segment in group)
             for _, group in groupby(segments, key=lambda segment: int(segment.start // 600))
@@ -333,6 +341,7 @@ def _summarize_sync(
             sections, model=settings.AI_SUMMARIZER_OPENAI_MODEL,
             api_key=settings.OPENAI_API_KEY, custom_prompt=custom_prompt,
             target_language=target_language, deadline=long_deadline,
+            on_progress=on_progress, trace_id=trace_id,
         )
     else:
         summary = _summarize_source_text_by_mode(
@@ -358,6 +367,8 @@ def _summarize_sync_with_whisper(
     video_url: str,
     custom_prompt: Optional[str],
     long_deadline: Optional[float] = None,
+    on_progress: Optional[Callable[[str], None]] = None,
+    trace_id: str = "-",
 ) -> _YouTubeSummarySyncResult:
     _require_supported_mode(settings)
     target_language = _infer_instruction_language(custom_prompt)
@@ -376,6 +387,7 @@ def _summarize_sync_with_whisper(
             int(getattr(settings, "AI_SUMMARIZER_WHISPER_DOWNLOAD_TIMEOUT_SEC", 240)),
         ),
         yt_dlp_binary=str(getattr(settings, "AI_SUMMARIZER_WHISPER_YTDLP_BINARY", "yt-dlp")),
+        **({"on_progress": on_progress} if on_progress else {}),
     )
     if long_deadline is not None:
         sections = (transcript_text,)
@@ -383,6 +395,7 @@ def _summarize_sync_with_whisper(
             sections, model=settings.AI_SUMMARIZER_OPENAI_MODEL,
             api_key=settings.OPENAI_API_KEY, custom_prompt=custom_prompt,
             target_language=target_language, deadline=long_deadline,
+            on_progress=on_progress, trace_id=trace_id,
         )
     else:
         summary = _summarize_source_text_by_mode(
@@ -472,6 +485,7 @@ async def summarize_video(
     custom_prompt: Optional[str],
     force_whisper: bool = False,
     long_summary: bool = False,
+    on_progress: Optional[Callable[[str], None]] = None,
 ) -> AiSummaryResult:
     """Summarize YouTube video or arbitrary webpage URL."""
     timeout = max(10, int(settings.AI_SUMMARIZER_TIMEOUT_SEC))
@@ -483,7 +497,15 @@ async def summarize_video(
             raise AiSummarizerError("/ai_long принимает только видео YouTube.")
         if _require_supported_mode(settings) != "openai":
             raise AiSummarizerError("Для /ai_long требуется режим OpenAI.")
-        sync_options["long_deadline"] = time.monotonic() + timeout
+        trace_id = f"{extract_video_id(video_url)}/{uuid.uuid4().hex[:8]}"
+        started = time.monotonic()
+
+        def report(stage: str) -> None:
+            logging.info("ai_long %s elapsed=%.1fs stage=%s", trace_id, time.monotonic() - started, stage)
+            if on_progress:
+                on_progress(stage)
+
+        sync_options.update(long_deadline=started + timeout, on_progress=report, trace_id=trace_id)
 
     youtube_result: Optional[_YouTubeSummarySyncResult] = None
     source_url = ""
@@ -522,6 +544,8 @@ async def summarize_video(
                 timeout=timeout,
             )
     except asyncio.TimeoutError as exc:
+        if long_summary:
+            logging.warning("ai_long %s timed out after %ds", trace_id, timeout)
         raise AiSummarizerError(f"Таймаут суммаризации ({timeout} сек).") from exc
     except ValueError as exc:
         raise AiSummarizerError(str(exc)) from exc
