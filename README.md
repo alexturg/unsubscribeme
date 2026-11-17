@@ -229,6 +229,7 @@ AI_SUMMARIZER_YOUTUBE_TRANSCRIPT_REQUEST_TIMEOUT_SEC=6
 |---|---|---|
 | `/start` | `/start` | Регистрация и ссылка на веб-интерфейс |
 | `/ai` | `/ai <youtube_url_or_video_id_or_page_url> [фокус]` | AI-суммаризация видео или веб-страницы |
+| `/ai_long` | `/ai_long <youtube_url_or_video_id> [фокус]` | Единая сводка длинного видео. Обрабатывает полный доступный транскрипт по частям, при отсутствии субтитров использует Whisper. Требует режим OpenAI |
 | `/audio` | `/audio <youtube_url_or_video_id>` | Экспорт аудио YouTube-видео |
 | `/transcribe` | `/transcribe <youtube_url_or_video_id>` | Транскрипт в `.txt` (с Whisper при необходимости) |
 | `/bullshit` | `/bullshit <youtube_channel_url_or_channel_id> [videos=15] [top=5]` | Детектор кликбейта/сомнительных заявлений по shortlist последних видео канала |

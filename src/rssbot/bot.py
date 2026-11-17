@@ -744,6 +744,7 @@ async def _run_ai_summary(
     send_text: Callable[[str, Optional[InlineKeyboardMarkup]], Awaitable[Optional[Message]]],
     *,
     force_whisper: bool = False,
+    long_summary: bool = False,
     source_request_message: Optional[Message] = None,
     card_message: Optional[Message] = None,
     existing_card_id: Optional[int] = None,
@@ -805,6 +806,8 @@ async def _run_ai_summary(
         if force_whisper
         else "Запускаю суммаризацию контента. Это может занять 20-90 секунд."
     )
+    if long_summary:
+        start_text = "Разбираю длинное видео по частям и собираю общую сводку. Это может занять несколько минут."
     progress_message = await _safe_send(start_text)
     if progress_message is None:
         return False
@@ -816,6 +819,7 @@ async def _run_ai_summary(
             video_url=video_url,
             custom_prompt=custom_prompt,
             force_whisper=force_whisper,
+            **({"long_summary": True} if long_summary else {}),
         )
     except AiSummarizerError as exc:
         await _cleanup_progress_message()
@@ -872,7 +876,7 @@ async def _run_ai_summary(
         return True
 
     seen_kb = choice_keyboard(card_id)
-    for chunk in split_message_chunks(response_text):
+    for chunk in split_message_chunks(response_text, max_len=1900 if long_summary else 3800):
         sent = await _safe_send(chunk, reply_markup=seen_kb)
         if sent is None:
             return False
@@ -1242,10 +1246,15 @@ async def cb_transcribe_whisper_confirm(callback: CallbackQuery) -> None:
 
 @router.message(Command("ai"))
 async def cmd_ai(message: Message) -> None:
-    """Суммаризировать YouTube-видео или обычную веб-страницу.
+    await _handle_ai_command(message)
 
-    Формат: /ai <youtube_url_or_video_id_or_page_url> [что именно вас интересует]
-    """
+
+@router.message(Command("ai_long"))
+async def cmd_ai_long(message: Message) -> None:
+    await _handle_ai_command(message, long_summary=True)
+
+
+async def _handle_ai_command(message: Message, *, long_summary: bool = False) -> None:
     user_id = _ensure_user_id(message)
     if not user_id:
         await message.answer(html_escape("Доступ запрещен.", quote=False))
@@ -1254,10 +1263,12 @@ async def cmd_ai(message: Message) -> None:
     try:
         request = parse_ai_request_text(message.text or "")
     except ValueError:
+        command = "/ai_long" if long_summary else "/ai"
+        source = "youtube_url_or_video_id" if long_summary else "youtube_url_or_video_id_or_page_url"
         await message.answer(
             html_escape(
-                "Использование: /ai <youtube_url_or_video_id_or_page_url> [дополнительный фокус]\n"
-                "Пример: /ai https://www.youtube.com/watch?v=dQw4w9WgXcQ "
+                f"Использование: {command} <{source}> [дополнительный фокус]\n"
+                f"Пример: {command} https://www.youtube.com/watch?v=dQw4w9WgXcQ "
                 "Выдели только практические выводы и риски.",
                 quote=False,
             )
@@ -1279,6 +1290,7 @@ async def cmd_ai(message: Message) -> None:
         request.custom_prompt,
         _send_text,
         source_request_message=message,
+        long_summary=long_summary,
     )
 
 

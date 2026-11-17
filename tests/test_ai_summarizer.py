@@ -436,3 +436,37 @@ def test_summarize_video_rejects_force_whisper_for_web_page(tmp_path):
                 force_whisper=True,
             )
         )
+
+
+@pytest.mark.parametrize("has_captions", [True, False])
+def test_ai_long_uses_complete_transcript(monkeypatch, tmp_path, has_captions):
+    def fetch(**kwargs):
+        if not has_captions:
+            raise ai_summarizer.TranscriptError("Subtitles are disabled")
+        return [
+            ai_summarizer.TranscriptSegment("Opening", 0.0, 1.0),
+            ai_summarizer.TranscriptSegment("Conclusion", 12600.0, 1.0),
+        ]
+
+    def summarize(sections, **kwargs):
+        assert list(sections) == (
+            ["Opening", "Conclusion"] if has_captions else ["Opening Conclusion"]
+        )
+        return "One summary"
+
+    monkeypatch.setattr(ai_summarizer, "fetch_transcript", fetch)
+    monkeypatch.setattr(
+        ai_summarizer, "transcribe_video_with_whisper", lambda *_, **__: "Opening Conclusion",
+    )
+    monkeypatch.setattr(ai_summarizer, "summarize_long_transcript_with_openai", summarize)
+
+    result = asyncio.run(ai_summarizer.summarize_video(
+        _settings(tmp_path),
+        chat_id=1,
+        video_url="https://youtu.be/y4rykwJv69k",
+        custom_prompt=None,
+        long_summary=True,
+    ))
+
+    assert result.summary_text == "One summary"
+    assert result.summary_basis == ("captions" if has_captions else "whisper")

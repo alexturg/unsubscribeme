@@ -361,3 +361,34 @@ def test_double_ai_click_runs_summary_once(monkeypatch):
     assert len(calls) == 1
     assert len(message.edits) == 2
     assert not sent
+
+
+def test_ai_long_command_sends_a_single_overall_summary(monkeypatch):
+    monkeypatch.setattr(bot_module, "_ensure_user_id", lambda _: 1)
+    monkeypatch.setattr(bot_module, "DEPS", SimpleNamespace(settings=SimpleNamespace()))
+    sent, send_text = _make_send_text()
+
+    async def summarize(_settings, **kwargs):
+        assert kwargs["long_summary"] is True
+        assert kwargs["video_url"] == "https://youtu.be/y4rykwJv69k"
+        assert kwargs["custom_prompt"] == "главные аргументы"
+        return AiSummaryResult(
+            summary_text="Итог по всему интервью.",
+            summary_path=None,
+            transcript_path=None,
+            source_type="youtube",
+            summary_basis="captions",
+        )
+
+    monkeypatch.setattr(bot_module, "summarize_video", summarize)
+
+    async def answer(text, reply_markup=None):
+        return await send_text(text, reply_markup)
+
+    message = DummyMessage("/ai_long https://youtu.be/y4rykwJv69k главные аргументы")
+    message.answer = answer
+    asyncio.run(bot_module.cmd_ai_long(message))
+
+    assert sent[0][2].deleted
+    assert len(sent) == 2
+    assert "Итог по всему интервью." in sent[1][0]
