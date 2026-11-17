@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import math
 import re
@@ -772,27 +773,32 @@ def summarize_long_transcript_with_openai(
             raise SummarizationError("Расшифровка видео пуста.")
 
         if len(chunks) > 1:
-            chunks = [
-                ask(
+            executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ai-long")
+            try:
+                def summarize_stage(instruction: str, sources: Iterable[str], budget: int) -> list[str]:
+                    return list(executor.map(lambda source: ask(instruction, source, budget), sources))
+
+                chunks = summarize_stage(
                     "Make compact notes for this consecutive fragment of a longer video. "
                     "Capture distinct claims, arguments, examples, decisions and changes of position. "
                     "Keep important qualifications and note who makes each claim.",
-                    chunk,
+                    chunks,
                     1200,
                 )
-                for chunk in chunks
-            ]
-            while len(chunks) > 8:
-                chunks = [
-                    ask(
+                while len(chunks) > 8:
+                    blocks = (
+                        "\n\n".join(chunks[start : start + 4])
+                        for start in range(0, len(chunks), 4)
+                    )
+                    chunks = summarize_stage(
                         "Synthesize the notes from these consecutive fragments into one block summary. "
                         "Combine repeated ideas. Preserve distinct substantive topics and how arguments develop. "
                         "Keep disagreements, changes of position and significant conclusions.",
-                        "\n\n".join(chunks[start : start + 4]),
+                        blocks,
                         1600,
                     )
-                    for start in range(0, len(chunks), 4)
-                ]
+            finally:
+                executor.shutdown(cancel_futures=True)
 
         return ask(
             "Write one concise, self-contained summary of the entire video. Open with its central "

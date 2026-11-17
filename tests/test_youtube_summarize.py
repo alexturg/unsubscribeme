@@ -21,6 +21,7 @@ def test_format_llm_summary_output_normalizes_plain_text():
 
 
 def test_long_summary_covers_every_section_and_retries_incomplete_output(monkeypatch):
+    from threading import Barrier
     from time import monotonic
     from types import SimpleNamespace
 
@@ -29,11 +30,14 @@ def test_long_summary_covers_every_section_and_retries_incomplete_output(monkeyp
     from rssbot.youtube_summarize import summarize_long_transcript_with_openai
 
     calls = []
+    first_workers = Barrier(4, timeout=5)
 
     def create(**kwargs):
         prompt, source = kwargs["input"][1]["content"].split("\n\nSource:\n", 1)
         calls.append((prompt, source, kwargs["max_output_tokens"]))
-        if len(calls) == 1:
+        if source in sections[:4] and kwargs["max_output_tokens"] == 1200:
+            first_workers.wait()
+        if source == sections[0] and kwargs["max_output_tokens"] == 1200:
             return SimpleNamespace(
                 status="incomplete",
                 incomplete_details=SimpleNamespace(reason="max_output_tokens"),
@@ -55,8 +59,7 @@ def test_long_summary_covers_every_section_and_retries_incomplete_output(monkeyp
     )
 
     assert result.split("\n\n") == sections
-    assert calls[0][1] == calls[1][1] == sections[0]
-    assert calls[1][2] == 2 * calls[0][2]
+    assert [budget for _, source, budget in calls if source == sections[0]] == [1200, 2400]
     assert sum("one block summary" in prompt for prompt, _, _ in calls) == 3
     assert all("Focus on the conclusions." in prompt for prompt, _, _ in calls)
     assert "summary of the entire video" in calls[-1][0]
