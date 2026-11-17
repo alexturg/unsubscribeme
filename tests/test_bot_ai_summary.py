@@ -425,7 +425,13 @@ def test_ai_long_command_shows_short_summary_and_opens_full_version(monkeypatch)
 @pytest.mark.parametrize("basis", ["captions", "metadata_comments"])
 def test_split_ai_response_has_buttons_only_on_the_last_message(monkeypatch, basis):
     monkeypatch.setattr(bot_module, "DEPS", SimpleNamespace(settings=SimpleNamespace()))
-    sent, send_text = _make_send_text()
+    sent, send = _make_send_text()
+
+    async def send_text(text, reply_markup=None):
+        message = await send(text, reply_markup)
+        message.message_id = len(sent)
+        return message
+
     summary_text = "Детали интервью.\n" * 500
 
     async def summarize(*args, **kwargs):
