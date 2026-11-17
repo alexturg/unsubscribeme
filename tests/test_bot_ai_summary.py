@@ -419,3 +419,32 @@ def test_ai_long_command_shows_short_summary_and_opens_full_version(monkeypatch)
     asyncio.run(bot_module.cb_ai_page(callback))
     assert "Полная версия интервью." in summary_message.text
     assert any(button.text == "→" for row in summary_message.reply_markup.inline_keyboard for button in row)
+
+
+
+@pytest.mark.parametrize("basis", ["captions", "metadata_comments"])
+def test_split_ai_response_has_buttons_only_on_the_last_message(monkeypatch, basis):
+    monkeypatch.setattr(bot_module, "DEPS", SimpleNamespace(settings=SimpleNamespace()))
+    sent, send_text = _make_send_text()
+    summary_text = "Детали интервью.\n" * 500
+
+    async def summarize(*args, **kwargs):
+        return AiSummaryResult(
+            summary_text, None, None, summary_basis=basis, video_id="y4rykwJv69k",
+        )
+
+    monkeypatch.setattr(bot_module, "summarize_video", summarize)
+
+    assert asyncio.run(bot_module._run_ai_summary(
+        123, "https://youtu.be/y4rykwJv69k", None, send_text,
+    ))
+
+    responses = sent[1:]
+    assert len(responses) > 1
+    assert all(markup is None for _, markup, _ in responses[:-1])
+    buttons = [button for row in responses[-1][1].inline_keyboard for button in row]
+    assert any(button.text == "✓" for button in buttons)
+    assert any((button.callback_data or "").startswith("ai:whisper:") for button in buttons) == (
+        basis == "metadata_comments"
+    )
+    assert "".join(text for text, _, _ in responses).endswith(summary_text)
