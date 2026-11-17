@@ -20,7 +20,7 @@ def test_format_llm_summary_output_normalizes_plain_text():
     assert formatted == "- One useful takeaway.\n- Second useful takeaway."
 
 
-def test_long_summary_covers_every_section_and_retries_incomplete_output(monkeypatch):
+def test_long_summary_covers_every_section_and_retries_incomplete_output(monkeypatch, caplog):
     from threading import Barrier
     from time import monotonic
     from types import SimpleNamespace
@@ -30,6 +30,8 @@ def test_long_summary_covers_every_section_and_retries_incomplete_output(monkeyp
     from rssbot.youtube_summarize import summarize_long_transcript_with_openai
 
     calls = []
+    stages = []
+    caplog.set_level("INFO")
     first_workers = Barrier(4, timeout=5)
 
     def create(**kwargs):
@@ -56,6 +58,8 @@ def test_long_summary_covers_every_section_and_retries_incomplete_output(monkeyp
         custom_prompt="Focus on the conclusions.",
         target_language="English",
         deadline=monotonic() + 30,
+        trace_id="test-trace",
+        on_progress=stages.append,
     )
 
     assert result.split("\n\n") == sections
@@ -63,3 +67,11 @@ def test_long_summary_covers_every_section_and_retries_incomplete_output(monkeyp
     assert sum("one block summary" in prompt for prompt, _, _ in calls) == 3
     assert all("Focus on the conclusions." in prompt for prompt, _, _ in calls)
     assert "summary of the entire video" in calls[-1][0]
+    assert stages == [
+        *(f"Фрагменты {number}/9" for number in range(10)),
+        *(f"Сводки по блокам {number}/3" for number in range(4)),
+        "Собираю общую сводку",
+    ]
+    assert "ai_long test-trace model start stage=fragment:1/9" in caplog.text
+    assert "ai_long test-trace model done stage=final" in caplog.text
+    assert "Section 0." not in caplog.text

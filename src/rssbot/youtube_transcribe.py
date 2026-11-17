@@ -929,6 +929,7 @@ def transcribe_video_with_whisper(
     max_audio_megabytes: int = 24,
     download_timeout_sec: int = 240,
     yt_dlp_binary: str = "yt-dlp",
+    on_progress: Callable[[str], None] | None = None,
 ) -> str:
     if max_audio_megabytes < 1:
         raise ValueError("max_audio_megabytes must be >= 1")
@@ -955,6 +956,8 @@ def transcribe_video_with_whisper(
 
     with tempfile.TemporaryDirectory(prefix="yt_whisper_") as tmp_dir:
         work_dir = Path(tmp_dir)
+        if on_progress:
+            on_progress("Скачиваю аудио для Whisper")
         downloaded_audio = _download_audio_for_whisper(
             watch_url=watch_url,
             work_dir=work_dir,
@@ -962,6 +965,8 @@ def transcribe_video_with_whisper(
             timeout_sec=download_timeout_sec,
         )
 
+        if on_progress:
+            on_progress("Готовлю аудио для Whisper")
         normalized_audio = _transcode_audio_for_whisper(
             source_audio=downloaded_audio,
             output_audio=work_dir / "audio_for_whisper.mp3",
@@ -1003,7 +1008,9 @@ def transcribe_video_with_whisper(
         transcript_chunks: list[str] = []
         try:
             client = OpenAI(api_key=api_key) if api_key else OpenAI()
-            for audio_part in audio_parts:
+            for index, audio_part in enumerate(audio_parts, start=1):
+                if on_progress:
+                    on_progress(f"Whisper: распознаю часть {index}/{len(audio_parts)}")
                 with audio_part.open("rb") as audio_file:
                     try:
                         response = client.audio.transcriptions.create(

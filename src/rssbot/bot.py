@@ -767,10 +767,14 @@ async def _run_ai_summary(
             return None
 
     progress_message: Optional[Message] = None
+    progress_task: Optional[asyncio.Task] = None
     request_message = source_request_message
 
     async def _cleanup_progress_message() -> None:
         nonlocal progress_message
+        if progress_task is not None:
+            progress_task.cancel()
+            await asyncio.gather(progress_task, return_exceptions=True)
         if progress_message is None:
             return
         try:
@@ -812,6 +816,38 @@ async def _run_ai_summary(
     if progress_message is None:
         return False
 
+    progress_stage = "Запуск"
+    summary_options = {}
+    if long_summary:
+        loop = asyncio.get_running_loop()
+        stage_changed = asyncio.Event()
+        started = loop.time()
+
+        def set_stage(stage: str) -> None:
+            nonlocal progress_stage
+            progress_stage = stage
+            stage_changed.set()
+
+        async def show_progress() -> None:
+            while True:
+                await stage_changed.wait()
+                stage_changed.clear()
+                elapsed = int(loop.time() - started)
+                try:
+                    await progress_message.edit_text(
+                        f"Разбираю длинное видео…\n{progress_stage} · {elapsed // 60}:{elapsed % 60:02d}",
+                    )
+                except Exception as exc:
+                    logging.debug("Could not edit ai_long progress: %s", type(exc).__name__)
+                await asyncio.sleep(4)
+
+        def report_progress(stage: str) -> None:
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(set_stage, stage)
+
+        summary_options.update(long_summary=True, on_progress=report_progress)
+        progress_task = asyncio.create_task(show_progress())
+
     try:
         result = await summarize_video(
             DEPS.settings,
@@ -819,14 +855,18 @@ async def _run_ai_summary(
             video_url=video_url,
             custom_prompt=custom_prompt,
             force_whisper=force_whisper,
-            **({"long_summary": True} if long_summary else {}),
+            **summary_options,
         )
+    except asyncio.CancelledError:
+        await _cleanup_progress_message()
+        raise
     except AiSummarizerError as exc:
         await _cleanup_progress_message()
         await _safe_send(
             "Не удалось сделать суммаризацию.\n"
             f"Источник: {video_url}\n"
             f"Ошибка: {str(exc)}"
+            + (f"\nПоследний этап: {progress_stage}" if long_summary else "")
         )
         return False
     except Exception as exc:
