@@ -68,7 +68,8 @@ def test_long_summary_covers_every_section_and_retries_incomplete_output(monkeyp
     assert [budget for _, source, budget in calls if source == sections[0]] == [2400, 4800, 9600]
     assert sum("one block summary" in prompt for prompt, _, _ in calls) == 3
     assert all("Focus on the conclusions." in prompt for prompt, _, _ in calls)
-    assert "summary of the entire video" in calls[-1][0]
+    assert "summaries of the entire video" in calls[-1][0]
+    assert "---FULL---" in calls[-1][0]
     assert stages == [
         *(f"Фрагменты {number}/9" for number in range(10)),
         *(f"Сводки по блокам {number}/3" for number in range(4)),

@@ -16,6 +16,7 @@ from .resource_limits import bounded_work
 from .web_summarize import WebSummarizationError, fetch_webpage_content
 from .youtube_context import VideoContext, VideoContextError, fetch_video_context
 from .youtube_summarize import (
+    LONG_SUMMARY_SEPARATOR,
     SummarizationError,
     summarize_long_transcript_with_openai,
     summarize_text,
@@ -50,6 +51,7 @@ class AiSummaryResult:
     source_type: str = "youtube"
     summary_basis: str = "captions"
     video_id: Optional[str] = None
+    short_summary_text: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -563,6 +565,15 @@ async def summarize_video(
     if not summary.strip():
         raise AiSummarizerError("Суммаризатор вернул пустой текст summary.")
 
+    short_summary = None
+    if long_summary:
+        brief, _, full = summary.partition(f"\n{LONG_SUMMARY_SEPARATOR}\n")
+        summary = full.strip() or brief.strip()
+        short_summary = " ".join((brief.strip() or summary).split())
+        if len(short_summary) > 500:
+            clipped = short_summary[:499]
+            short_summary = (clipped.rsplit(" ", 1)[0] if " " in clipped else clipped) + "…"
+
     persist_outputs = bool(getattr(settings, "AI_SUMMARIZER_SAVE_OUTPUT_FILES", False))
     summary_path: Optional[Path] = None
     source_text_path: Optional[Path] = None
@@ -641,6 +652,7 @@ async def summarize_video(
         source_type="youtube" if is_youtube_source else "web_page",
         summary_basis=summary_basis,
         video_id=video_id,
+        short_summary_text=short_summary,
     )
 
 

@@ -363,8 +363,9 @@ def test_double_ai_click_runs_summary_once(monkeypatch):
     assert not sent
 
 
-def test_ai_long_command_sends_a_single_overall_summary(monkeypatch):
+def test_ai_long_command_shows_short_summary_and_opens_full_version(monkeypatch):
     monkeypatch.setattr(bot_module, "_ensure_user_id", lambda _: 1)
+    monkeypatch.setattr(bot_module, "_is_allowed", lambda _: True)
     monkeypatch.setattr(bot_module, "DEPS", SimpleNamespace(settings=SimpleNamespace()))
     sent, send_text = _make_send_text()
     progress_shown: asyncio.Event
@@ -376,7 +377,8 @@ def test_ai_long_command_sends_a_single_overall_summary(monkeypatch):
         await asyncio.to_thread(kwargs["on_progress"], "Фрагменты 1/22")
         await asyncio.wait_for(progress_shown.wait(), timeout=5)
         return AiSummaryResult(
-            summary_text="Итог по всему интервью.",
+            summary_text="Полная версия интервью.\n" + "Детали. " * 400,
+            short_summary_text="Короткий итог.",
             summary_path=None,
             transcript_path=None,
             source_type="youtube",
@@ -407,4 +409,13 @@ def test_ai_long_command_sends_a_single_overall_summary(monkeypatch):
     assert sent[0][2].deleted
     assert "Фрагменты 1/22" in sent[0][2].edits[0][0]
     assert len(sent) == 2
-    assert "Итог по всему интервью." in sent[1][0]
+    assert "Короткий итог." in sent[1][0]
+    assert "Полная версия" not in sent[1][0]
+    more = next(button for row in sent[1][1].inline_keyboard for button in row if button.text == "More")
+    summary_message = sent[1][2]
+    summary_message.reply_markup = sent[1][1]
+    callback = DummyCallback(summary_message)
+    callback.data = more.callback_data
+    asyncio.run(bot_module.cb_ai_page(callback))
+    assert "Полная версия интервью." in summary_message.text
+    assert any(button.text == "→" for row in summary_message.reply_markup.inline_keyboard for button in row)
