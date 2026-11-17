@@ -907,28 +907,16 @@ async def _run_ai_summary(
         await _cleanup_source_request_message()
         return True
 
+    rows = []
     if result.summary_basis == "metadata_comments" and result.video_id and not force_whisper:
-        whisper_kb = choice_keyboard(
-            card_id,
-            rows=[
-                [
-                    InlineKeyboardButton(
-                        text="Сделать транскрипцию через Whisper",
-                        callback_data=f"ai:whisper:{result.video_id}",
-                    )
-                ]
-            ]
-        )
-        sent = await _safe_send(response_text, reply_markup=whisper_kb)
-        if sent is None:
-            return False
-        register_card_message(card_id, chat_id, getattr(sent, "message_id", None))
-        await _cleanup_source_request_message()
-        return True
-
-    seen_kb = choice_keyboard(card_id)
-    for chunk in split_message_chunks(response_text, max_len=1900 if long_summary else 3800):
-        sent = await _safe_send(chunk, reply_markup=seen_kb)
+        rows.append([InlineKeyboardButton(
+            text="Сделать транскрипцию через Whisper",
+            callback_data=f"ai:whisper:{result.video_id}",
+        )])
+    keyboard = choice_keyboard(card_id, rows=rows)
+    chunks = split_message_chunks(response_text, max_len=1900 if long_summary else 3800)
+    for index, chunk in enumerate(chunks, start=1):
+        sent = await _safe_send(chunk, reply_markup=keyboard if index == len(chunks) else None)
         if sent is None:
             return False
         register_card_message(card_id, chat_id, getattr(sent, "message_id", None))
