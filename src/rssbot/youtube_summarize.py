@@ -722,6 +722,9 @@ def summarize_text_with_openai(
     return summary
 
 
+LONG_SUMMARY_SEPARATOR = "---FULL---"
+
+
 def summarize_long_transcript_with_openai(
     sections: Iterable[str],
     *,
@@ -852,10 +855,13 @@ def summarize_long_transcript_with_openai(
         if on_progress:
             on_progress("Собираю общую сводку")
         return ask(
-            "Write one concise, self-contained summary of the entire video. Open with its central "
-            "idea, then give the key points in enough detail to convey the arguments. "
-            "Combine related topics and avoid repetition. Consider material from all parts, "
-            "including the ending. Use about 5–7 points when appropriate and adapt to the user's focus.",
+            "Write two self-contained summaries of the entire video. First, give a quick takeaway "
+            "in one short paragraph of 2–3 sentences, at most 450 characters, with no heading. "
+            "Lead with the main conclusion and include only the most important points. "
+            f"Then place {LONG_SUMMARY_SEPARATOR} alone on its own line. "
+            "After it, write the full summary with the key arguments, evidence and qualifications. "
+            "Use about 5–7 points when appropriate. Both versions should reflect the ending "
+            "and the user's focus. Avoid repetition within each version.",
             "\n\n".join(chunks),
             "final",
         )

@@ -896,6 +896,17 @@ async def _run_ai_summary(
 
     response_text = f"{status_line}\nИсточник: {video_url}{focus_text}\n\n{result.summary_text}"
     card_id = create_ai_card(chat_id, f"AI: {video_url}", video_url, response_text)
+    if long_summary and result.short_summary_text:
+        source = f"https://youtu.be/{result.video_id}" if result.video_id else video_url
+        preview = f"{status_line}\nИсточник: {source}\n\n{result.short_summary_text}"
+        more = InlineKeyboardButton(text="More", callback_data=f"ai:page:{card_id}:0")
+        sent = await _safe_send(preview, reply_markup=choice_keyboard(card_id, rows=[[more]]))
+        if sent is None:
+            return False
+        register_card_message(card_id, chat_id, getattr(sent, "message_id", None))
+        await _cleanup_source_request_message()
+        return True
+
     if result.summary_basis == "metadata_comments" and result.video_id and not force_whisper:
         whisper_kb = choice_keyboard(
             card_id,

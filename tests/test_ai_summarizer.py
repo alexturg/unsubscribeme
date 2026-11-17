@@ -452,7 +452,7 @@ def test_ai_long_uses_complete_transcript(monkeypatch, tmp_path, has_captions):
         assert list(sections) == (
             ["Opening", "Conclusion"] if has_captions else ["Opening Conclusion"]
         )
-        return "One summary"
+        return "Quick takeaway.\n---FULL---\nOne summary"
 
     monkeypatch.setattr(ai_summarizer, "fetch_transcript", fetch)
     monkeypatch.setattr(
@@ -469,4 +469,5 @@ def test_ai_long_uses_complete_transcript(monkeypatch, tmp_path, has_captions):
     ))
 
     assert result.summary_text == "One summary"
+    assert result.short_summary_text == "Quick takeaway."
     assert result.summary_basis == ("captions" if has_captions else "whisper")
