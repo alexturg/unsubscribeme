@@ -37,13 +37,15 @@ def test_long_summary_covers_every_section_and_retries_incomplete_output(monkeyp
     def create(**kwargs):
         prompt, source = kwargs["input"][1]["content"].split("\n\nSource:\n", 1)
         calls.append((prompt, source, kwargs["max_output_tokens"]))
-        if source in sections[:4] and kwargs["max_output_tokens"] == 1200:
+        if source in sections[:4] and kwargs["max_output_tokens"] == 2400:
             first_workers.wait()
-        if source == sections[0] and kwargs["max_output_tokens"] == 1200:
+        if source == sections[0] and kwargs["max_output_tokens"] < 9600:
             return SimpleNamespace(
                 status="incomplete",
                 incomplete_details=SimpleNamespace(reason="max_output_tokens"),
                 output_text="Discard this partial response.",
+                usage=SimpleNamespace(output_tokens=kwargs["max_output_tokens"],
+                                      output_tokens_details=SimpleNamespace(reasoning_tokens=2300)),
             )
         return SimpleNamespace(status="completed", output_text=source)
 
@@ -63,7 +65,7 @@ def test_long_summary_covers_every_section_and_retries_incomplete_output(monkeyp
     )
 
     assert result.split("\n\n") == sections
-    assert [budget for _, source, budget in calls if source == sections[0]] == [1200, 2400]
+    assert [budget for _, source, budget in calls if source == sections[0]] == [2400, 4800, 9600]
     assert sum("one block summary" in prompt for prompt, _, _ in calls) == 3
     assert all("Focus on the conclusions." in prompt for prompt, _, _ in calls)
     assert "summary of the entire video" in calls[-1][0]
@@ -75,3 +77,5 @@ def test_long_summary_covers_every_section_and_retries_incomplete_output(monkeyp
     assert "ai_long test-trace model start stage=fragment:1/9" in caplog.text
     assert "ai_long test-trace model done stage=final" in caplog.text
     assert "Section 0." not in caplog.text
+    assert "reason=max_output_tokens" in caplog.text
+    assert "reasoning_tokens=2300" in caplog.text
